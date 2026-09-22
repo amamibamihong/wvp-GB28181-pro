@@ -6,6 +6,7 @@ import com.genersoft.iot.vmp.gb28181.bean.SipTransactionInfo;
 import com.genersoft.iot.vmp.gb28181.event.SipSubscribe;
 import com.genersoft.iot.vmp.gb28181.event.sip.SipEvent;
 import com.genersoft.iot.vmp.gb28181.utils.SipUtils;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114NoteIntegrator;
 import com.genersoft.iot.vmp.utils.GitUtil;
 import gov.nist.javax.sip.SipProviderImpl;
 import gov.nist.javax.sip.address.SipUri;
@@ -44,6 +45,9 @@ public class SIPSender {
     @Autowired
     private SipConfig sipConfig;
 
+    @Autowired
+    private Gb35114NoteIntegrator gb35114NoteIntegrator;
+
     public void transmitRequest(String ip, Message message) throws SipException, ParseException {
         transmitRequest(ip, message, null, null, null);
     }
@@ -57,6 +61,9 @@ public class SIPSender {
     }
 
     public void transmitRequest(String ip, Message message, SipSubscribe.Event errorEvent, SipSubscribe.Event okEvent, Long timeout) throws SipException {
+        // GB35114 A 级：出站非 REGISTER 请求按对端 VKEK 注入 Date + Note（集中出站加签点）。
+        gb35114NoteIntegrator.decorateOutgoing(message);
+
         ViaHeader viaHeader = (ViaHeader) message.getHeader(ViaHeader.NAME);
         String transport = "UDP";
         if (viaHeader == null) {

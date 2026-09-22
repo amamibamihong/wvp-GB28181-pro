@@ -114,6 +114,19 @@ public class PlatformServiceImpl implements IPlatformService {
     @Autowired
     private PlatformStatusTaskRunner statusTaskRunner;
 
+    /**
+     * 启动流程里「对仍在有效期的平台发送注销」这一步是否已经结束。
+     *
+     * <p>默认 {@code false}：{@code @Scheduled} 标注的任务在容器 refresh 阶段就会被注册并开始
+     * 执行，<b>早于</b> {@link ApplicationReadyEvent}。也就是说容器刚起来时
+     * {@link #statusLostCheck()} 可能先跑，与 {@link #onApplicationReady()} 里的注销流程并发
+     * 操作同一个平台的同一条 SIP 通道。
+     */
+    private volatile boolean startupUnregisterFinished = false;
+
+    /** 应用启动时刻，作为 {@link #startupUnregisterFinished} 的兜底 */
+    private final long startupTimestamp = System.currentTimeMillis();
+
     @EventListener(ApplicationReadyEvent.class)
     public void onApplicationReady(){
 
@@ -147,24 +160,38 @@ public class PlatformServiceImpl implements IPlatformService {
         // 启动时 如果存在未过期的注册平台，则发送注销
         List<PlatformRegisterTaskInfo> registerTaskInfoList = statusTaskRunner.getAllRegisterTaskInfo();
         if (registerTaskInfoList.isEmpty()) {
+            startupUnregisterFinished = true;
             return;
         }
-        for (PlatformRegisterTaskInfo taskInfo : registerTaskInfoList) {
-            log.info("[国标级联] 启动服务是发现平台注册仍在有效期，注销： {}", taskInfo.getPlatformServerId());
-            Platform platform = queryPlatformByServerGBId(taskInfo.getPlatformServerId());
-            if (platform == null) {
-                statusTaskRunner.removeRegisterTask(taskInfo.getPlatformServerId());
-                continue;
+        try {
+            for (PlatformRegisterTaskInfo taskInfo : registerTaskInfoList) {
+                log.info("[国标级联] 启动服务是发现平台注册仍在有效期，注销： {}", taskInfo.getPlatformServerId());
+                Platform platform = queryPlatformByServerGBId(taskInfo.getPlatformServerId());
+                if (platform == null) {
+                    statusTaskRunner.removeRegisterTask(taskInfo.getPlatformServerId());
+                    continue;
+                }
+                if (userSetting.getServerId().equals(platform.getServerId())) {
+                    sendUnRegister(platform, taskInfo.getSipTransactionInfo());
+                }
             }
-            if (userSetting.getServerId().equals(platform.getServerId())) {
-                sendUnRegister(platform, taskInfo.getSipTransactionInfo());
-            }
+        } finally {
+            startupUnregisterFinished = true;
         }
         // 启动时所有平台默认离线
         platformMapper.offlineAll(userSetting.getServerId());
     }
     @Scheduled(fixedDelay = 20, timeUnit = TimeUnit.SECONDS)   //每3秒执行一次
     public void statusLostCheck(){
+        // 启动注销流程（onApplicationReady 里对「仍在有效期」的平台发注销）还没走完时不要发起注册：
+        // 两条流程会并发操作同一个平台的同一条 SIP 通道，而 NioTcpMessageChannel 重新建连
+        //（[2] Old socket different）时会关掉旧 socket，先发出去的那条 REGISTER 会连 socket 一起
+        // 被另一个线程关掉，对端根本收不到，只在 2 秒后表现为「注册失败: 消息超时未回复」。
+        // 兜底：万一上面那段清理逻辑抛异常导致标记没置位，启动 60 秒后强制放行。
+        if (!startupUnregisterFinished
+                && System.currentTimeMillis() - startupTimestamp < 60_000L) {
+            return;
+        }
         // 每隔20秒检测，是否存在启用但是未注册的平台，存在则发起注册
         // 获取所有在线并且启用的平台
         List<Platform> platformList = platformMapper.queryServerIdsWithEnableAndServer(userSetting.getServerId());

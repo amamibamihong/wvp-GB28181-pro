@@ -13,6 +13,9 @@ import com.genersoft.iot.vmp.gb28181.transmit.SIPSender;
 import com.genersoft.iot.vmp.gb28181.transmit.cmd.ISIPCommanderForPlatform;
 import com.genersoft.iot.vmp.gb28181.transmit.cmd.SIPRequestHeaderPlarformProvider;
 import com.genersoft.iot.vmp.gb28181.utils.SipUtils;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114DeviceStateMachine;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114SecurityService;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114SipHeaders;
 import com.genersoft.iot.vmp.media.bean.MediaServer;
 import com.genersoft.iot.vmp.media.event.hook.HookSubscribe;
 import com.genersoft.iot.vmp.media.service.IMediaServerService;
@@ -84,6 +87,9 @@ public class SIPCommanderForPlatform implements ISIPCommanderForPlatform {
     @Autowired
     private GitUtil gitUtil;
 
+    @Autowired
+    private Gb35114SecurityService gb35114SecurityService;
+
     @Override
     public void register(Platform parentPlatform, SipSubscribe.Event errorEvent , SipSubscribe.Event okEvent) throws InvalidArgumentException, ParseException, SipException {
         register(parentPlatform, null, null, errorEvent, okEvent, true);
@@ -124,8 +130,38 @@ public class SIPCommanderForPlatform implements ISIPCommanderForPlatform {
                 request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform,
                         redisCatchStorage.getCSEQ(), fromTag,
                         toTag, callIdHeader, isRegister? parentPlatform.getExpires() : 0);
+
+                // GB35114 A 级：本平台作为下级，registerWay=3/4 时首包用 Capability 宣告（无 Digest 认证头）。
+                if (gb35114SecurityService.isEnabled()
+                        && (parentPlatform.getRegisterWay() == 3 || parentPlatform.getRegisterWay() == 4)) {
+                    Gb35114DeviceStateMachine machine = gb35114SecurityService.uacStateMachine(
+                            parentPlatform.getDeviceGBId(), parentPlatform.getServerGBId(),
+                            parentPlatform.getDeviceCertId(), parentPlatform.getPlatformCertId());
+                    if (machine != null) {
+                        String capability = machine.initialAuthorization();
+                        Gb35114SipHeaders.addRawHeader(request, "Authorization", capability);
+                    }
+                }
             }else {
-                request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform, fromTag, toTag, www, callIdHeader, isRegister? parentPlatform.getExpires() : 0);
+                // GB35114 A 级：401 的 WWW-Authenticate 是 Bidirection/Unidirection 时，
+                // 由状态机用 sign1 应答挑战（而非 MD5 Digest）。
+                String scheme = www == null ? null : www.getScheme();
+                if ("Bidirection".equalsIgnoreCase(scheme) || "Unidirection".equalsIgnoreCase(scheme)) {
+                    request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform,
+                            redisCatchStorage.getCSEQ(), fromTag,
+                            toTag, callIdHeader, isRegister ? parentPlatform.getExpires() : 0);
+                    Gb35114DeviceStateMachine machine = gb35114SecurityService.uacStateMachine(
+                            parentPlatform.getDeviceGBId(), parentPlatform.getServerGBId(),
+                            parentPlatform.getDeviceCertId(), parentPlatform.getPlatformCertId());
+                    if (machine == null) {
+                        log.error("[GB35114级联] 未配置设备证书，无法应答国密挑战");
+                        throw new SipException("GB35114 device certificate not configured");
+                    }
+                    String authorization = machine.authorizeWithChallenge(Gb35114SipHeaders.value(www));
+                    Gb35114SipHeaders.addRawHeader(request, "Authorization", authorization);
+                } else {
+                    request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform, fromTag, toTag, www, callIdHeader, isRegister? parentPlatform.getExpires() : 0);
+                }
             }
 
             sipSender.transmitRequest(parentPlatform.getDeviceIp(), request, (event)->{

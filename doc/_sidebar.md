@@ -22,6 +22,12 @@
 * **必备技巧**
     * [抓包](_content/skill/tcpdump.md)
 
+* **GB35114 国密**
+    * [设计说明](gb35114/design.md)
+    * [安装说明](gb35114/install.md)
+    * [使用说明](gb35114/usage.md)
+    * [补丁与合并说明](gb35114/patch.md)
+
 * **常见问答**
     - [如何反馈BUG](_content/qa/bug.md)
     - [如何参与开发](_content/qa/development.md)

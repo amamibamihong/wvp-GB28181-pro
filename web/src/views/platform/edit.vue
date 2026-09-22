@@ -71,6 +71,50 @@
                 <el-option label="涉密" :value="1" />
               </el-select>
             </el-form-item>
+            <el-form-item label="注册方式" prop="registerWay">
+              <el-select
+                v-model="value.registerWay"
+                style="width: 100%"
+                placeholder="请选择注册方式"
+              >
+                <el-option label="摘要认证（RFC3261）" :value="1" />
+                <el-option label="口令双向认证" :value="2" />
+                <el-option label="证书双向认证（GB35114）" :value="3" />
+                <el-option label="证书单向认证（GB35114）" :value="4" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="国密设备证书">
+              <el-select
+                v-model="value.deviceCertId"
+                style="width: 100%"
+                placeholder="本平台作下级注册用的设备证书（缺省用全局配置）"
+                clearable
+                filterable
+              >
+                <el-option
+                  v-for="cert in deviceCerts"
+                  :key="cert.id"
+                  :label="certLabel(cert)"
+                  :value="cert.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="上级平台证书">
+              <el-select
+                v-model="value.platformCertId"
+                style="width: 100%"
+                placeholder="受信上级平台证书（验sign2，缺省用全局配置）"
+                clearable
+                filterable
+              >
+                <el-option
+                  v-for="cert in platformCerts"
+                  :key="cert.id"
+                  :label="certLabel(cert)"
+                  :value="cert.id"
+                />
+              </el-select>
+            </el-form-item>
             <el-form-item label="目录分组" prop="catalogGroup">
               <el-select
                 v-model="value.catalogGroup"
@@ -144,6 +188,7 @@
 </template>
 
 <script>
+import { listCert, PURPOSE_DEVICE_IDENTITY, PURPOSE_TRUSTED_PLATFORM } from '@/api/gb35114'
 
 export default {
   name: 'PlatformEdit',
@@ -168,6 +213,7 @@ export default {
       showDialog: false,
       isLoging: false,
       onSubmit_text: '保存',
+      certList: [],
 
       rules: {
         name: [{ required: true, message: '请输入平台名称', trigger: 'blur' }],
@@ -197,10 +243,57 @@ export default {
       this.streamProxy = newValue
     }
   },
+  computed: {
+    deviceCerts() {
+      // 本平台作下级接入上级时用「本地客户端证书」（UAC，签 sign1）
+      return (this.certList || []).filter(c => c.purpose === PURPOSE_DEVICE_IDENTITY && !c.revoked)
+    },
+    platformCerts() {
+      // 验上级下发的 sign2，用「上级服务端证书」（仅公钥）
+      return (this.certList || []).filter(c => c.purpose === PURPOSE_TRUSTED_PLATFORM && !c.revoked)
+    }
+  },
   created() {
-
+    this.loadCertList()
   },
   methods: {
+    certLabel(cert) {
+      // 主键 id 保证唯一，避免 CN 重复无法分辨
+      let label = '#' + cert.id + ' ' + (cert.subjectCn || '未命名')
+      if (cert.gbId) {
+        label += '（' + cert.gbId + '）'
+      }
+      if (cert.caId) {
+        label += ' · CA签发'
+      } else {
+        label += ' · 自签'
+      }
+      // 接入多个上级时列表里可能有多张同 CN 的证书，靠有效期与状态区分；
+      // 过期与否由后端策略决定是否拦截，这里只如实标出，不做取舍。
+      if (!cert.certPem) {
+        label += ' · 待签发'
+      } else if (this.certExpired(cert)) {
+        label += ' · 已过期（' + cert.notAfter + '）'
+      } else if (cert.notAfter) {
+        label += ' · 有效至 ' + cert.notAfter
+      }
+      return label
+    },
+    /** 证书是否已过有效期（后端存 'yyyy-MM-dd HH:mm:ss'，Safari 需替换空格为 T） */
+    certExpired(cert) {
+      if (!cert || !cert.notAfter) return false
+      const t = Date.parse(String(cert.notAfter).replace(' ', 'T'))
+      return !isNaN(t) && t < Date.now()
+    },
+    loadCertList: function() {
+      listCert()
+        .then(res => {
+          this.certList = (res && res.data) || []
+        })
+        .catch(error => {
+          console.log(error)
+        })
+    },
     onSubmit: function() {
       this.saveLoading = true
       if (this.value.id) {

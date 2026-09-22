@@ -34,3 +34,6 @@ certificates
 /打包/
 /snap/
 /config/
+
+# GB35114 部署口令（模板见 docker/gb35114-deploy/.env.example）
+.env

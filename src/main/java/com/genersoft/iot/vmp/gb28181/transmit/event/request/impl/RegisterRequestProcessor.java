@@ -14,6 +14,11 @@ import com.genersoft.iot.vmp.gb28181.transmit.SIPSender;
 import com.genersoft.iot.vmp.gb28181.transmit.event.request.ISIPRequestProcessor;
 import com.genersoft.iot.vmp.gb28181.transmit.event.request.SIPRequestProcessorParent;
 import com.genersoft.iot.vmp.gb28181.utils.SipUtils;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114Exception;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114PlatformStateMachine;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114SecurityService;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114SipHeaders;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114VkekCache;
 import com.genersoft.iot.vmp.storager.IRedisCatchStorage;
 import com.genersoft.iot.vmp.utils.IpPortUtil;
 import gov.nist.javax.sip.address.AddressImpl;
@@ -68,6 +73,12 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
 
     @Autowired
     private IRedisCatchStorage redisCatchStorage;
+
+    @Autowired
+    private Gb35114SecurityService gb35114SecurityService;
+
+    @Autowired
+    private Gb35114VkekCache gb35114VkekCache;
 
 
     @Override
@@ -144,6 +155,22 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
 
     private void registerHandler(Device device, SIPRequest request, RemoteAddressInfo remoteAddressInfo,
                                   String deviceId, String requestAddress) throws SipException, NoSuchAlgorithmException, ParseException {
+        // GB35114 A 级：优先按请求头识别国密注册。
+        // 设备是主动注册过来的，首包时库里可能还没有这条设备记录（被动注册），
+        // 因此不能只依赖预置的 registerWay；Authorization 的 scheme 才是权威依据。
+        Integer registerWay = device == null ? null : device.getRegisterWay();
+        String authScheme = Gb35114SipHeaders.schemeOf(
+                Gb35114SipHeaders.rawHeaderValue(request, "Authorization"));
+        boolean gb35114Scheme = "Capability".equalsIgnoreCase(authScheme)
+                || "Unidirection".equalsIgnoreCase(authScheme)
+                || "Bidirection".equalsIgnoreCase(authScheme);
+        boolean gb35114Configured = registerWay != null && (registerWay == 3 || registerWay == 4);
+        if (gb35114SecurityService.isEnabled() && (gb35114Scheme || gb35114Configured)) {
+            gb35114RegisterHandler(device, request, remoteAddressInfo, deviceId, requestAddress,
+                    resolveRegisterWay(authScheme, registerWay));
+            return;
+        }
+
         if (device != null && device.getSipTransactionInfo() != null &&
                 request.getCallIdHeader().getCallId().equals(device.getSipTransactionInfo().getCallId())) {
             log.info("[注册续订] 设备：{}", device.getDeviceId());
@@ -239,6 +266,137 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
         redisCatchStorage.updateDeviceRegisterTimeStamp(List.of(device));
 
         log.info("[注册成功] deviceId: {}->{}", deviceId, requestAddress);
+    }
+
+    /**
+     * GB35114 A 级证书注册：Capability 宣告 → 401 challenge；已认证 Authorization → 200 + SecurityInfo。
+     */
+    /**
+     * 判定本次注册使用的国密方案：Bidirection(3) / Unidirection(4)。
+     *
+     * <p>设备主动注册时库里可能没有预置 registerWay，此时以 Authorization scheme 为准，
+     * 并在后续落库时把它固化下来，避免每次注册都要人工配置。
+     */
+    private int resolveRegisterWay(String authScheme, Integer configured) {
+        if ("Bidirection".equalsIgnoreCase(authScheme)) {
+            return 3;
+        }
+        if ("Unidirection".equalsIgnoreCase(authScheme)) {
+            return 4;
+        }
+        return configured != null && configured == 4 ? 4 : 3;
+    }
+
+    private void gb35114RegisterHandler(Device device, SIPRequest request, RemoteAddressInfo remoteAddressInfo,
+                                        String deviceId, String requestAddress, int registerWay)
+            throws SipException, ParseException {
+        // 国密握手里的 serverid 是「平台的国标编码」，即 sip.id（如 35020000002000000001），
+        // 不是 userSetting.serverId（那是集群内节点标识，默认 000000）。
+        // 设备签名 sign1 时用的就是 sip.id，这里必须一致，否则报 server id mismatch。
+        //
+        // 签名身份必须与「该设备配置时导入的平台证书」配对，否则设备验 sign2 失败并
+        // 拒绝对后续信令服务。平台可并存多张服务端证书，故优先取设备级绑定；
+        // 未绑定时由 Gb35114SecurityService 回退到全局配置/默认证书。
+        // 绑定/配置的证书若已吊销或过期，这里会抛异常并回 403 —— 过期即拒绝接入，
+        // 不做「换一张证书再签」的静默降级（那会让设备侧验签失败，故障点漂到设备侧）。
+        Integer deviceServerCertId = device == null ? null : device.getServerCertId();
+        Gb35114PlatformStateMachine machine;
+        try {
+            machine = gb35114SecurityService.platformStateMachine(
+                    userSetting.getServerId(), sipConfig.getId(), deviceServerCertId);
+        } catch (Gb35114Exception e) {
+            log.warn("[GB35114注册] 设备：{} 拒绝注册：{}", deviceId, e.getMessage());
+            Response response = getMessageFactory().createResponse(Response.FORBIDDEN, request);
+            response.setReasonPhrase("GB35114 server certificate unavailable");
+            sipSender.transmitRequest(request.getLocalAddress().getHostAddress(), response);
+            return;
+        }
+
+        String authorization = Gb35114SipHeaders.rawHeaderValue(request, "Authorization");
+        String scheme = Gb35114SipHeaders.schemeOf(authorization);
+
+        if ("Capability".equalsIgnoreCase(scheme)) {
+            // 首包：生成 random1 挑战，回 401。
+            String www = machine.challenge(deviceId, authorization);
+            Response response = getMessageFactory().createResponse(Response.UNAUTHORIZED, request);
+            Gb35114SipHeaders.addRawHeader(response, "WWW-Authenticate", www);
+            sipSender.transmitRequest(request.getLocalAddress().getHostAddress(), response);
+            log.info("[GB35114注册] 设备：{} 收到 Capability，回 401 challenge（mode={}）", deviceId, registerWay);
+            return;
+        }
+
+        if ("Unidirection".equalsIgnoreCase(scheme) || "Bidirection".equalsIgnoreCase(scheme)) {
+            // 已认证包：验 sign1、协商 VKEK、Bidirection 时签 sign2，回 200 + SecurityInfo。
+            String securityInfo;
+            try {
+                securityInfo = machine.verifyRegister(deviceId, authorization);
+            } catch (Gb35114Exception e) {
+                log.warn("[GB35114注册] 设备：{} 认证失败: {}", deviceId, e.getMessage());
+                Response response = getMessageFactory().createResponse(Response.FORBIDDEN, request);
+                response.setReasonPhrase("GB35114 authentication failed");
+                sipSender.transmitRequest(request.getLocalAddress().getHostAddress(), response);
+                return;
+            }
+
+            byte[] vkek = machine.vkek(deviceId);
+            if (vkek != null) {
+                gb35114VkekCache.put(deviceId, vkek);
+            }
+
+            Response response = getMessageFactory().createResponse(Response.OK, request);
+            Gb35114SipHeaders.addRawHeader(response, "SecurityInfo", securityInfo);
+            response.addHeader(request.getHeader(ContactHeader.NAME));
+            response.addHeader(request.getExpires());
+
+            sipSender.transmitRequest(request.getLocalAddress().getHostAddress(), response);
+
+            // 落库 / 上线逻辑对齐 Digest 注册成功分支。
+            Device target = device;
+            if (target == null) {
+                target = new Device();
+                target.setStreamMode("TCP-PASSIVE");
+                target.setCharset("GB2312");
+                target.setGeoCoordSys("WGS84");
+                target.setMediaServerId("auto");
+                target.setDeviceId(deviceId);
+                target.setOnLine(false);
+            } else {
+                if (ObjectUtils.isEmpty(target.getStreamMode())) {
+                    target.setStreamMode("TCP-PASSIVE");
+                }
+                if (ObjectUtils.isEmpty(target.getCharset())) {
+                    target.setCharset("GB2312");
+                }
+                if (ObjectUtils.isEmpty(target.getGeoCoordSys())) {
+                    target.setGeoCoordSys("WGS84");
+                }
+            }
+            target.setRegisterWay(registerWay);
+            target.setServerId(userSetting.getServerId());
+            target.setIp(remoteAddressInfo.getIp());
+            target.setPort(remoteAddressInfo.getPort());
+            target.setHostAddress(IpPortUtil.concatenateIpAndPort(remoteAddressInfo.getIp(), String.valueOf(remoteAddressInfo.getPort())));
+            target.setLocalIp(request.getLocalAddress().getHostAddress());
+            target.setExpires(request.getExpires().getExpires());
+
+            ViaHeader reqViaHeader = (ViaHeader) request.getHeader(ViaHeader.NAME);
+            String transport = reqViaHeader.getTransport();
+            target.setTransport("TCP".equalsIgnoreCase(transport) ? "TCP" : "UDP");
+
+            target.setRegisterTimeStamp(System.currentTimeMillis());
+            SipTransactionInfo sipTransactionInfo = new SipTransactionInfo((SIPResponse) response);
+            target.setSipTransactionInfo(sipTransactionInfo);
+            deviceService.online(target);
+            redisCatchStorage.updateDeviceRegisterTimeStamp(List.of(target));
+
+            log.info("[GB35114注册成功] deviceId: {}->{}（mode={}）", deviceId, requestAddress, registerWay);
+            return;
+        }
+
+        // 既非 Capability 也非 Unidirection/Bidirection：视为未认证，回 401 走 challenge 起步。
+        Response response = getMessageFactory().createResponse(Response.UNAUTHORIZED, request);
+        sipSender.transmitRequest(request.getLocalAddress().getHostAddress(), response);
+        log.info("[GB35114注册] 设备：{} 缺少国密 Authorization，回 401", deviceId);
     }
 
     private void cancellationHandler(Device device, SIPRequest request, RemoteAddressInfo remoteAddressInfo,

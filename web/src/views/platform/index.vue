@@ -278,6 +278,9 @@ export default {
             address: null,
             secrecy: 1,
             catalogGroup: 1,
+            registerWay: 1,
+            deviceCertId: null,
+            platformCertId: null,
             civilCode: null,
             sendStreamIp: data.sendStreamIp
           }

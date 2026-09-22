@@ -16,11 +16,11 @@ public interface PlatformMapper {
     @Insert("INSERT INTO wvp_platform (enable, name, server_gb_id, server_gb_domain, server_ip, server_port,device_gb_id,device_ip,"+
             " device_port,username,password,expires,keep_timeout,transport,character_set,ptz,rtcp,status,catalog_group, update_time," +
             " create_time, as_message_channel, send_stream_ip, auto_push_channel, catalog_with_platform,catalog_with_group,catalog_with_region, "+
-            " civil_code,manufacturer,model,address,register_way,secrecy,server_id) " +
+            " civil_code,manufacturer,model,address,register_way,secrecy,device_cert_id,platform_cert_id,server_id) " +
             " VALUES (#{enable}, #{name}, #{serverGBId}, #{serverGBDomain}, #{serverIp}, #{serverPort}, #{deviceGBId}, #{deviceIp}, " +
             " #{devicePort}, #{username}, #{password}, #{expires}, #{keepTimeout}, #{transport}, #{characterSet}, #{ptz}, #{rtcp}, #{status}, #{catalogGroup},#{updateTime}," +
             " #{createTime}, #{asMessageChannel}, #{sendStreamIp}, #{autoPushChannel}, #{catalogWithPlatform}, #{catalogWithGroup},#{catalogWithRegion}, " +
-             " #{civilCode}, #{manufacturer}, #{model}, #{address}, #{registerWay}, #{secrecy}, #{serverId})")
+             " #{civilCode}, #{manufacturer}, #{model}, #{address}, #{registerWay}, #{secrecy}, #{deviceCertId}, #{platformCertId}, #{serverId})")
     int add(Platform parentPlatform);
 
     @Update("UPDATE wvp_platform " +
@@ -55,8 +55,10 @@ public interface PlatformMapper {
             " model=#{model}, " +
             " address=#{address}, " +
             " register_way=#{registerWay}, " +
-            " server_id=#{serverId}, " +
-            " secrecy=#{secrecy} " +
+            " secrecy=#{secrecy}, " +
+            " device_cert_id=#{deviceCertId}, " +
+            " platform_cert_id=#{platformCertId}, " +
+            " server_id=#{serverId} " +
             "WHERE id=#{id}")
     int update(Platform parentPlatform);
 

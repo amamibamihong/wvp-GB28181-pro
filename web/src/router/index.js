@@ -242,6 +242,19 @@ export const constantRoutes = [
     ]
   },
   {
+    path: '/gb35114',
+    component: Layout,
+    redirect: '/gb35114',
+    children: [
+      {
+        path: '',
+        name: 'Gb35114Cert',
+        component: () => import('@/views/gb35114/index'),
+        meta: { title: 'GB35114 证书管理', icon: 'el-icon-key' }
+      }
+    ]
+  },
+  {
     path: '/user',
     component: Layout,
     redirect: '/user',

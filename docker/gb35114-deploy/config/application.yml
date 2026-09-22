@@ -1,0 +1,96 @@
+# GB35114 测试部署外置配置
+# 容器内网络：mysql=wvp-gb35114-mysql，redis=wvp-gb35114-redis
+# HTTP 端口 18978，SIP 端口 5060
+
+spring:
+  application:
+    name: wvp
+  # 接口超时
+  mvc:
+    async:
+      request-timeout: 20000
+  thymeleaf:
+    cache: false
+  # 上传文件大小限制
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 100MB
+  data:
+    redis:
+      host: wvp-gb35114-redis
+      port: 6379
+      database: 0
+      password:
+      timeout: 10000
+  datasource:
+    type: com.zaxxer.hikari.HikariDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://wvp-gb35114-mysql:3306/wvp?useUnicode=true&characterEncoding=UTF8&rewriteBatchedStatements=true&serverTimezone=PRC&useSSL=false&allowMultiQueries=true&allowPublicKeyRetrieval=true
+    username: root
+    # 与同目录 docker-compose.yml 的 MYSQL_ROOT_PASSWORD 同源（由 .env 提供）
+    password: ${MYSQL_ROOT_PASSWORD}
+    hikari:
+      connection-timeout: 20000
+      maximum-pool-size: 20
+      minimum-idle: 5
+
+server:
+  port: 18978
+  ssl:
+    enabled: false
+
+# 28181 服务器配置
+sip:
+  ip: 0.0.0.0
+  # 前端展示用 IP，改成本机可访问 IP
+  show-ip: ${WVP_SHOW_IP}
+  port: 5060
+  domain: 3502000000
+  id: 35020000002000000001
+  # 默认设备认证密码（Digest 注册用）
+  password: ${WVP_PWD}
+  alarm: false
+  timeout: 1000
+
+# GB35114 国密 A 级配置
+gb35114:
+  # 国密总开关
+  enabled: true
+  # 本平台作为下级向上级注册使用的设备证书ID（在 web 界面签发后回填）
+  # device-cert-id:
+  # 本平台作为 UAS 使用的服务器证书ID（双向时配置）
+  # server-cert-id:
+  # 受信上级平台证书ID（UAC 验 sign2）
+  # platform-cert-id:
+  # 私钥落地加密密钥（生产环境务必修改）
+  key-encrypt-password: ${WVP_GB35114_KEY_PWD}
+  # 证书默认有效期（天）
+  cert-validity-days: 3650
+
+# zlm 默认服务器配置（本次测试不部署 zlm，保留占位）
+media:
+  id: no-zlm
+  ip: 127.0.0.1
+  http-port: 80
+  auto-config: false
+  secret: ${ZLM_SECRET}
+  rtp:
+    enable: false
+
+# 业务配置
+user-settings:
+  server-id: 000000
+  auto-apply-play: false
+  play-timeout: 18000
+  platform-play-timeout: 60000
+  # 接口鉴权（JWT 登录）
+  interface-authentication: true
+  record-push-live: false
+  record-sip: false
+  stream-on-demand: true
+  # 接口文档开关
+  doc-enable: true
+
+logging:
+  config: classpath:logback-spring.xml

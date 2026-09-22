@@ -213,6 +213,22 @@ public class Device {
 	@Schema(description = "所属服务Id")
 	private String serverId;
 
+	@Schema(description = "注册方式：1-摘要认证，3-基于数字证书双向认证，4-基于数字证书单向认证")
+	private Integer registerWay;
+
+	@Schema(description = "关联的国密证书ID（wvp_gb35114_cert.id）")
+	private Integer certId;
+
+	/**
+	 * 该设备信任的服务器证书 ID（{@code wvp_gb35114_cert.id}）。
+	 *
+	 * <p>平台可并存多张服务端证书，而设备只信任它配置时导入的那张平台证书的公钥。
+	 * 此处为空时用全局默认证书；显式绑定后，即使平台新增/切换了默认证书，本设备的
+	 * sign2 仍用这张签，不会被静默打挂。
+	 */
+	@Schema(description = "该设备信任的服务器证书ID（空则用默认证书）")
+	private Integer serverCertId;
+
     public boolean checkWgs84() {
         return geoCoordSys.equalsIgnoreCase("WGS84");
     }

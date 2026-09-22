@@ -124,6 +124,10 @@ public class DeviceServiceImpl implements IDeviceService {
     @Autowired
     private DeviceStatusManager deviceStatusManager;
 
+    /** 国密总开关，决定目录同步前是否留出 VKEK 就绪余量。 */
+    @Autowired
+    private com.genersoft.iot.vmp.gb35114.conf.Gb35114Config gb35114Config;
+
     private Device getDeviceByDeviceIdFromDb(String deviceId) {
         return deviceMapper.getDeviceByDeviceId(deviceId);
     }
@@ -768,6 +772,16 @@ public class DeviceServiceImpl implements IDeviceService {
             catalogResponseMessageHandler.setChannelSyncReady(device, sn);
         }
         try {
+            // 现场联调定位用：设备刚回 200 OK 时，其事件线程还在解密 cryptkey、装 VKEK，
+            // 紧接着发出的查询会被它按「密钥未就绪」拒绝（403）。这里留出一段余量，
+            // 用于判定 403 是否由时序竞争引起。
+            if (gb35114Config.isEnabled() && gb35114Config.getSyncDelayMs() > 0) {
+                try {
+                    Thread.sleep(gb35114Config.getSyncDelayMs());
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             sipCommander.catalogQuery(device, sn, event -> {
                 String errorMsg = String.format("同步通道失败，错误码： %s, %s", event.statusCode, event.msg);
                 log.info("[同步通道]失败,编号: {}, 错误码： {}, {}", device.getDeviceId(), event.statusCode, event.msg);

@@ -65,6 +65,9 @@ public class ZLMMediaServerStatusManager {
     @Autowired
     private EventPublisher eventPublisher;
 
+    @Autowired
+    private org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate;
+
     private final String type = "zlm";
 
     @Async
@@ -183,7 +186,14 @@ public class ZLMMediaServerStatusManager {
 
     private void online(MediaServer mediaServer, ZLMServerConfig config) {
         MediaServer mediaServerInDb = mediaServerService.getOne(mediaServer.getId());
-        if (mediaServerInDb == null || !mediaServerInDb.isStatus()) {
+        // 判据不能只看缓存里的 status：它可能是上一次成功上线留下的，而「在线集合」
+        // （VMP_ONLINE_MEDIA_SERVERS，点播时靠它挑节点）已因 Redis 重启/离线清理而清空。
+        // 两者一旦不一致，status=true 会让这里整个跳过上线分支 —— 既不发上线事件、
+        // 也不补写在线集合，节点就此永远「在线但不可用」，点播恒报「无在线节点」。
+        // 因此再确认一次在线登记是否真的存在。
+        boolean registered = mediaServerInDb != null && mediaServerInDb.isStatus()
+                && isRegisteredOnline(mediaServer.getId());
+        if (!registered) {
             log.info("[ZLM-连接成功] ID：{}, 地址： {}:{}", mediaServer.getId(), mediaServer.getIp(), mediaServer.getHttpPort());
             offlineZlmPrimaryMap.remove(mediaServer.getId());
             offlineZlmsecondaryMap.remove(mediaServer.getId());
@@ -231,6 +241,26 @@ public class ZLMMediaServerStatusManager {
             mediaServerService.update(mediaServer);
         }, (int)(mediaServer.getHookAliveInterval() * 2 * 1000));
     }
+    /**
+     * 该节点是否已登记在「在线媒体节点集合」中。
+     *
+     * <p>点播取节点走的是这个 zset（{@code getMediaServerForMinimumLoad}），
+     * 它只由 {@code update(status=true)} → {@code resetOnlineServerItem} 写入。
+     * 缓存里的 {@code status} 字段与它并不等价，故上线判定必须同时看这里。
+     */
+    private boolean isRegisteredOnline(String mediaServerId) {
+        try {
+            String key = com.genersoft.iot.vmp.common.VideoManagerConstants.ONLINE_MEDIA_SERVERS_PREFIX
+                    + userSetting.getServerId();
+            return redisTemplate.opsForZSet().score(key, mediaServerId) != null;
+        } catch (Exception e) {
+            // 查询失败时按「未登记」处理：宁可重走一次上线流程（幂等），
+            // 也不要因为读不到就认定已在线，那会让节点永远进不了在线集合。
+            log.warn("[ZLM] 查询在线登记失败，按未登记处理 ID：{}，{}", mediaServerId, e.getMessage());
+            return false;
+        }
+    }
+
     private void initPort(MediaServer mediaServerItem, ZLMServerConfig zlmServerConfig) {
         // 端口只会从配置中读取一次，一旦自己配置或者读取过了将不在配置
         mediaServerItem.setHttpSSlPort(zlmServerConfig.getHttpSSLport());

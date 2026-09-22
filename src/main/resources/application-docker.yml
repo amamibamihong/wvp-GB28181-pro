@@ -49,6 +49,24 @@ sip:
     # [可选] 公共认证密码 移除密码将必须提前添加设备才能通过认证
     password: ${WVP_PWD:admin123}
 
+# GB35114 国密A级（证书认证 + 信令Note完整性）配置
+gb35114:
+    # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
+    enabled: ${WVP_GB35114_ENABLED:false}
+    # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id），为空时 UAC 侧国密注册走 Digest
+    # 证书ID为空时可注释掉下面三行，避免空字符串绑定 Integer 失败；启用时填入 wvp_gb35114_cert.id
+    # device-cert-id: ${WVP_GB35114_DEVICE_CERT_ID}
+    # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
+    # server-cert-id: ${WVP_GB35114_SERVER_CERT_ID}
+    # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
+    # platform-cert-id: ${WVP_GB35114_PLATFORM_CERT_ID}
+    # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
+    key-encrypt-password: ${WVP_GB35114_KEY_PWD:wvp-gb35114-default}
+    # [可选] 证书默认有效期（天）
+    cert-validity-days: ${WVP_GB35114_CERT_VALIDITY_DAYS:3650}
+    # [可选] 是否拒绝已过期的证书，默认 false（过期只在页面标出，不拦截注册；吊销始终拒绝）
+    reject-expired-cert: ${WVP_GB35114_REJECT_EXPIRED_CERT:false}
+
 #zlm 默认服务器配置
 media:
     # [必须修改] zlm服务器唯一id，用于触发hook时区别是哪台服务器,general.mediaServerId

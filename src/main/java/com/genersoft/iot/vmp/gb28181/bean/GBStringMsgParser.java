@@ -251,6 +251,19 @@ public class GBStringMsgParser implements MessageParser {
                     e.printStackTrace();
                 }
 
+            } else {
+                // 无 listener 时原实现直接吞掉异常，这个头就此从消息里消失 —— 既不在标准头里，
+                // 也不在 unrecognizedHeaders 里，事后完全取不回来。
+                //
+                // 这条路径并非理论情况：本项目用 NIO TCP（CustomNioTcpMessageProcessor），
+                // 而 jain-sip 的 NioPipelineParser 给 parseSIPMessage 传的 listener 就是 null
+                // （阻塞式 PipelinedMsgParser 才传通道自身）。GB35114 的 Date 是 ISO8601
+                // （如 2026-09-17T20:27:26.000），标准 DateParser 要求 RFC1123 带星期几，
+                // 必然解析失败 —— 于是 Note 验签拿不到 Date，摘要无法复算，设备的所有
+                // 非 REGISTER 请求（Catalog 查询的响应等）全被当作过期而丢弃。
+                //
+                // 保留原始头文本，供 Gb35114SipHeaders.unparsedHeaderValue 取回。
+                message.addUnparsed(header);
             }
         }
     }

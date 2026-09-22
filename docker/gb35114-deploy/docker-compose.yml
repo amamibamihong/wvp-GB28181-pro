@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  wvp-gb35114-mysql:
+    image: mysql:8.0.32
+    restart: always
+    environment:
+      MYSQL_DATABASE: wvp
+      # 从同目录 .env 读取（见 .env.example）；未设置时 compose 直接报错，不会静默用弱口令
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --lower-case-table-names=1
+      - --default-time-zone=+8:00
+    volumes:
+      - ./mysql/data:/var/lib/mysql
+      - ./mysql/01-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./mysql/02-gb35114.sql:/docker-entrypoint-initdb.d/02-gb35114.sql:ro
+    healthcheck:
+      # 用 CMD-SHELL 而非 CMD：CMD 形式不做变量展开，$$ 由 compose 转义后交给容器内 shell
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - gb35114-net
+
+  wvp-gb35114-redis:
+    image: redis:7-alpine
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./redis/data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - gb35114-net
+
+  wvp-gb35114:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      wvp-gb35114-mysql:
+        condition: service_healthy
+      wvp-gb35114-redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "18978:18978"
+      - "5060:5060/tcp"
+      - "5060:5060/udp"
+    volumes:
+      - ./config:/config:ro
+      - ./logs:/opt/wvp/logs
+    networks:
+      - gb35114-net
+
+networks:
+  gb35114-net:
+    driver: bridge

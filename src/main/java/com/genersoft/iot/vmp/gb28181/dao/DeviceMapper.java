@@ -44,6 +44,9 @@ public interface DeviceMapper {
             "server_id,"+
             "media_server_id," +
             "broadcast_push_after_ack," +
+            "register_way," +
+            "cert_id," +
+            "server_cert_id," +
             "(SELECT count(0) FROM wvp_device_channel dc WHERE dc.data_type = 1 and dc.data_device_id= de.id) as channel_count "+
             " FROM wvp_device de WHERE de.device_id = #{deviceId}")
     Device getDeviceByDeviceId( @Param("deviceId") String deviceId);
@@ -78,7 +81,10 @@ public interface DeviceMapper {
                 "broadcast_push_after_ack,"+
                 "geo_coord_sys,"+
                 "server_id,"+
-                "on_line"+
+                "on_line,"+
+                "register_way,"+
+                "cert_id,"+
+                "server_cert_id"+
             ") VALUES (" +
                 "#{deviceId}," +
                 "#{name}," +
@@ -109,7 +115,10 @@ public interface DeviceMapper {
                 "#{broadcastPushAfterAck}," +
                 "#{geoCoordSys}," +
                 "#{serverId}," +
-                "#{onLine}" +
+                "#{onLine}," +
+                "#{registerWay}," +
+                "#{certId}," +
+                "#{serverCertId}" +
             ")")
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
     int add(Device device);
@@ -136,6 +145,7 @@ public interface DeviceMapper {
                 ", subscribe_cycle_for_alarm=#{subscribeCycleForAlarm}" +
                 ", expires=#{expires}" +
                 ", server_id=#{serverId}" +
+                ", register_way=#{registerWay}" +
                 " WHERE device_id=#{deviceId}"+
             " </script>"})
     int update(Device device);
@@ -345,6 +355,7 @@ public interface DeviceMapper {
             ", ip=#{ip}, sdp_ip=#{sdpIp}, port=#{port}, charset=#{charset}" +
             ", ssrc_check=#{ssrcCheck}, as_message_channel=#{asMessageChannel}" +
             ", broadcast_push_after_ack=#{broadcastPushAfterAck}, geo_coord_sys=#{geoCoordSys}, media_server_id=#{mediaServerId}" +
+            ", register_way=#{registerWay}, cert_id=#{certId}, server_cert_id=#{serverCertId}" +
             " WHERE id=#{id}"+
             " </script>"})
     void updateCustom(Device device);
@@ -424,6 +435,11 @@ public interface DeviceMapper {
             ",position_capability" +
             ",broadcast_push_after_ack" +
             ",server_id" +
+            // 编辑页需要回显这几列：updateCustom 是全字段覆盖写，
+            // 列表不返回就会在用户改任意字段时把国密配置清成 NULL。
+            ",register_way" +
+            ",cert_id" +
+            ",server_cert_id" +
             ",(SELECT count(0) FROM wvp_device_channel dc WHERE dc.data_type = #{dataType} and dc.data_device_id= de.id) as channel_count " +
             " FROM wvp_device de" +
             " where 1 = 1 "+

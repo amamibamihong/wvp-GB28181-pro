@@ -128,6 +128,12 @@ public class Platform {
     @Schema(description = "保密属性（必选）缺省为0；0-不涉密，1-涉密")
     private int secrecy = 0;
 
+    @Schema(description = "GB35114 本平台作为下级注册使用的设备证书ID（关联 wvp_gb35114_cert，缺省回退全局配置）")
+    private Integer deviceCertId;
+
+    @Schema(description = "GB35114 受信上级平台证书ID（验 sign2，关联 wvp_gb35114_cert，缺省回退全局配置）")
+    private Integer platformCertId;
+
     @Schema(description = "执行注册的服务ID")
     private String serverId;
 }

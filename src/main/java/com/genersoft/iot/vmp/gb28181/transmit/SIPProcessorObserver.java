@@ -5,6 +5,7 @@ import com.genersoft.iot.vmp.gb28181.event.SipSubscribe;
 import com.genersoft.iot.vmp.gb28181.event.sip.SipEvent;
 import com.genersoft.iot.vmp.gb28181.transmit.event.request.ISIPRequestProcessor;
 import com.genersoft.iot.vmp.gb28181.transmit.event.response.ISIPResponseProcessor;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114NoteIntegrator;
 import gov.nist.javax.sip.message.SIPResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -14,6 +15,7 @@ import org.springframework.stereotype.Component;
 import javax.sip.*;
 import javax.sip.header.CSeqHeader;
 import javax.sip.header.CallIdHeader;
+import javax.sip.message.Request;
 import javax.sip.message.Response;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,6 +37,9 @@ public class SIPProcessorObserver implements ISIPProcessorObserver {
 
     @Autowired
     private EventPublisher eventPublisher;
+
+    @Autowired
+    private Gb35114NoteIntegrator gb35114NoteIntegrator;
 
     /**
      * 添加 request订阅
@@ -61,7 +66,25 @@ public class SIPProcessorObserver implements ISIPProcessorObserver {
     @Override
     @Async
     public void processRequest(RequestEvent requestEvent) {
-        String method = requestEvent.getRequest().getMethod();
+        Request request = requestEvent.getRequest();
+        String method = request.getMethod();
+
+        // GB35114 A 级：入站非 REGISTER 请求带 Note 头时先验签，失败回 403 并丢弃。
+        if (!gb35114NoteIntegrator.verifyIncoming(request)) {
+            log.warn("[GB35114] 丢弃 Note 验签失败的 {} 请求", method);
+            try {
+                javax.sip.message.Response forbidden =
+                        SipFactory.getInstance().createMessageFactory()
+                                .createResponse(Response.FORBIDDEN, request);
+                if (requestEvent.getServerTransaction() != null) {
+                    requestEvent.getServerTransaction().sendResponse(forbidden);
+                }
+            } catch (Exception e) {
+                log.warn("[GB35114] 回 403 失败: {}", e.getMessage());
+            }
+            return;
+        }
+
         ISIPRequestProcessor sipRequestProcessor = requestProcessorMap.get(method);
         if (sipRequestProcessor == null) {
             log.warn("不支持方法{}的request", method);

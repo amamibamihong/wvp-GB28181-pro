@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: wvp
+  mvc:
+    async:
+      request-timeout: 20000
+  thymeleaf:
+    cache: false
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 100MB
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 16379
+      database: 0
+      password:
+      timeout: 10000
+  datasource:
+    type: com.zaxxer.hikari.HikariDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:13306/wvp?useUnicode=true&characterEncoding=UTF8&rewriteBatchedStatements=true&serverTimezone=PRC&useSSL=false&allowMultiQueries=true&allowPublicKeyRetrieval=true
+    username: root
+    # 与同目录 docker-compose.yml 的 MYSQL_ROOT_PASSWORD 同源（由 .env 提供）
+    password: ${MYSQL_ROOT_PASSWORD}
+    hikari:
+      connection-timeout: 20000
+      maximum-pool-size: 20
+      minimum-idle: 5
+
+server:
+  port: 18978
+  ssl:
+    enabled: false
+
+sip:
+  ip: 0.0.0.0
+  show-ip: ${WVP_SHOW_IP}
+  port: 5060
+  domain: 3502000000
+  id: 35020000002000000001
+  password: ${WVP_PWD}
+  alarm: false
+  timeout: 1000
+
+gb35114:
+  enabled: true
+  key-encrypt-password: ${WVP_GB35114_KEY_PWD}
+  cert-validity-days: 3650
+
+media:
+  id: no-zlm
+  ip: 127.0.0.1
+  http-port: 80
+  auto-config: false
+  secret: ${ZLM_SECRET}
+  rtp:
+    enable: false
+    port-range: 30000,30500
+    send-port-range: 50502,50506
+
+user-settings:
+  server-id: 000000
+  auto-apply-play: false
+  play-timeout: 18000
+  platform-play-timeout: 60000
+  interface-authentication: true
+  record-push-live: false
+  record-sip: false
+  stream-on-demand: true
+  doc-enable: true
+
+logging:
+  config: classpath:logback-spring.xml
