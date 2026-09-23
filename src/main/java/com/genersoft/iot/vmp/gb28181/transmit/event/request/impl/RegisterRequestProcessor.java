@@ -295,9 +295,9 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
         // 设备签名 sign1 时用的就是 sip.id，这里必须一致，否则报 server id mismatch。
         //
         // 签名身份必须与「该设备配置时导入的平台证书」配对，否则设备验 sign2 失败并
-        // 拒绝对后续信令服务。平台可并存多张服务端证书，故优先取设备级绑定；
-        // 未绑定时由 Gb35114SecurityService 回退到全局配置/默认证书。
-        // 绑定/配置的证书若已吊销或过期，这里会抛异常并回 403 —— 过期即拒绝接入，
+        // 拒绝对后续信令服务。优先取设备级绑定；未绑定时用证书表中唯一的那张服务端证书
+        // （该用途由后端强制唯一，见 Gb35114SecurityService#platformStateMachine）。
+        // 绑定的证书若已吊销或同密钥组内已无可用证书，这里会抛异常并回 403，
         // 不做「换一张证书再签」的静默降级（那会让设备侧验签失败，故障点漂到设备侧）。
         Integer deviceServerCertId = device == null ? null : device.getServerCertId();
         Gb35114PlatformStateMachine machine;

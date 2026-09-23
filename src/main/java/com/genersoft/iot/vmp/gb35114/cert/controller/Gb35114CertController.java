@@ -47,7 +47,7 @@ public class Gb35114CertController {
     private IGb35114CertService certService;
 
     /**
-     * UAS 状态机持有签名身份与已协商的 VKEK。证书新增/吊销/删除/切换默认后必须丢弃
+     * UAS 状态机持有签名身份与已协商的 VKEK。证书新增/吊销/删除/换发后必须丢弃
      * 缓存的状态机，否则会继续用旧私钥签 sign2 —— 设备验签失败即拒绝对后续信令服务。
      */
     @Autowired
@@ -56,9 +56,14 @@ public class Gb35114CertController {
     @Autowired
     private Gb35114Config config;
 
-    /** 丢弃全部 UAS 状态机缓存，下次注册时按最新证书集重建。 */
+    /**
+     * 丢弃全部证书状态机缓存（UAS + UAC），下次注册时按最新证书集重建。
+     *
+     * <p>「同密钥再签」是原地更新（证书 ID 不变），复合键不变，所以不能只清 UAS 侧 ——
+     * 级联侧的 UAC 状态机会继续持有换发前的旧证书身份。
+     */
     private void resetPlatformStateMachines() {
-        gb35114SecurityService.invalidateAllPlatformStateMachines();
+        gb35114SecurityService.invalidateAllCertStateMachines();
     }
 
     /**
@@ -272,15 +277,6 @@ public class Gb35114CertController {
     @PostMapping("/revoke/{id}")
     public WVPResult<?> revoke(@PathVariable int id) {
         certService.revokeCert(id);
-        resetPlatformStateMachines();
-        return WVPResult.success();
-    }
-
-    @Operation(summary = "设为默认服务器证书（未绑定设备的设备注册时使用该证书签 sign2）",
-            security = @SecurityRequirement(name = JwtUtils.HEADER))
-    @PostMapping("/default/{id}")
-    public WVPResult<?> setDefault(@PathVariable int id) {
-        certService.setDefaultServerIdentity(id);
         resetPlatformStateMachines();
         return WVPResult.success();
     }

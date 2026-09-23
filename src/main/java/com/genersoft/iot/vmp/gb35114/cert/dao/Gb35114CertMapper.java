@@ -17,7 +17,7 @@ public interface Gb35114CertMapper {
     String LITE_COLUMNS =
             " id, purpose, type, gb_id, subject_cn, subject_dn, country, province, locality, " +
             " organization, organizational_unit, serial_number, ca_id, cert_pem, csr_pem, " +
-            " not_before, not_after, validity_days, key_usage, revoked, is_default, key_fingerprint, " +
+            " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
             " remark, create_time, " +
             " CASE WHEN key_pem IS NULL OR key_pem = '' THEN 0 ELSE 1 END AS has_key ";
 
@@ -25,18 +25,18 @@ public interface Gb35114CertMapper {
     String LITE_COLUMNS_DM =
             " id, purpose, type, gb_id, subject_cn, subject_dn, country, province, locality, " +
             " organization, organizational_unit, serial_number, ca_id, cert_pem, csr_pem, " +
-            " not_before, not_after, validity_days, key_usage, revoked, is_default, key_fingerprint, " +
+            " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
             " remark, create_time, " +
             " CASE WHEN key_pem IS NULL OR LENGTH(key_pem) = 0 THEN 0 ELSE 1 END AS has_key ";
 
     @Insert("INSERT INTO wvp_gb35114_cert (purpose, type, gb_id, subject_cn, subject_dn, country, province, " +
             " locality, organization, organizational_unit, serial_number, ca_id, cert_pem, key_pem, csr_pem, " +
-            " not_before, not_after, validity_days, key_usage, revoked, is_default, key_fingerprint, " +
+            " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
             " remark, create_time) " +
             " VALUES (#{purpose}, #{type}, #{gbId}, #{subjectCn}, #{subjectDn}, #{country}, #{province}, " +
             " #{locality}, #{organization}, #{organizationalUnit}, #{serialNumber}, #{caId}, #{certPem}, " +
             " #{keyPem}, #{csrPem}, #{notBefore}, #{notAfter}, #{validityDays}, #{keyUsage}, #{revoked}, " +
-            " #{isDefault}, #{keyFingerprint}, #{remark}, #{createTime})")
+            " #{keyFingerprint}, #{remark}, #{createTime})")
     @Options(useGeneratedKeys = true, keyProperty = "id")
     int add(Gb35114Cert cert);
 
@@ -111,28 +111,45 @@ public interface Gb35114CertMapper {
     @Update(value = "UPDATE wvp_gb35114_cert SET revoked=#{revoked} WHERE id=#{id}", databaseId = "dm")
     int updateRevoked(@Param("id") int id, @Param("revoked") boolean revoked);
 
-    /** 清除全部默认标记（仅服务器证书维度），与 {@link #markDefault} 配合实现「唯一默认」。 */
-    @Update("UPDATE wvp_gb35114_cert SET is_default=0 WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "'")
-    @Update(value = "UPDATE wvp_gb35114_cert SET is_default=0 WHERE purpose='" +
-            Gb35114Cert.PURPOSE_SERVER_IDENTITY + "'", databaseId = "dm")
-    int clearDefault();
-
-    /** 置某张服务器证书为默认。 */
-    @Update("UPDATE wvp_gb35114_cert SET is_default=1 WHERE id=#{id}")
-    @Update(value = "UPDATE wvp_gb35114_cert SET is_default=1 WHERE id=#{id}", databaseId = "dm")
-    int markDefault(@Param("id") int id);
+    /**
+     * 原地换发：更新已有记录的证书内容，<b>不新增行</b>。
+     *
+     * <p>「同密钥再签」走这里。新增行会让证书 ID 变化，而配置文件、{@code wvp_device.server_cert_id}、
+     * {@code wvp_platform.device_cert_id} 等处都是按 ID 引用的 —— ID 一变，这些引用立刻悬空，
+     * 且只在注册时才暴露。原地更新让 ID 恒定，引用永不失效。
+     *
+     * <p>不动 {@code key_pem}（复用同一密钥对）与 {@code csr_pem}（CSR 未变）。
+     */
+    @Update("UPDATE wvp_gb35114_cert SET cert_pem=#{certPem}, serial_number=#{serialNumber}, " +
+            " subject_cn=#{subjectCn}, subject_dn=#{subjectDn}, ca_id=#{caId}, " +
+            " not_before=#{notBefore}, not_after=#{notAfter}, validity_days=#{validityDays}, " +
+            " key_usage=#{keyUsage}, key_fingerprint=#{keyFingerprint}, revoked=0 " +
+            " WHERE id=#{id}")
+    @Update(value = "UPDATE wvp_gb35114_cert SET cert_pem=#{certPem}, serial_number=#{serialNumber}, " +
+            " subject_cn=#{subjectCn}, subject_dn=#{subjectDn}, ca_id=#{caId}, " +
+            " not_before=#{notBefore}, not_after=#{notAfter}, validity_days=#{validityDays}, " +
+            " key_usage=#{keyUsage}, key_fingerprint=#{keyFingerprint}, revoked=0 " +
+            " WHERE id=#{id}", databaseId = "dm")
+    int updateServerIdentity(@Param("id") int id, @Param("certPem") String certPem,
+                             @Param("serialNumber") String serialNumber,
+                             @Param("subjectCn") String subjectCn, @Param("subjectDn") String subjectDn,
+                             @Param("caId") Integer caId,
+                             @Param("notBefore") String notBefore, @Param("notAfter") String notAfter,
+                             @Param("validityDays") Integer validityDays,
+                             @Param("keyUsage") String keyUsage,
+                             @Param("keyFingerprint") String keyFingerprint);
 
     /**
-     * 查默认服务器证书（按 is_default 过滤，按 id 倒序兜底）。
+     * 查全部服务端证书（按 id 倒序，最新的在前）。
      *
      * <p>吊销/有效期/私钥的过滤放在 Java 层，规避三方言布尔与 clob 差异。
      */
     @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert " +
             " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' " +
-            " ORDER BY is_default DESC, id DESC")
+            " ORDER BY id DESC")
     @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert " +
             " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' " +
-            " ORDER BY is_default DESC, id DESC", databaseId = "dm")
+            " ORDER BY id DESC", databaseId = "dm")
     List<Gb35114Cert> queryServerIdentities();
 
     /** 按公钥指纹查同组证书（同一个签名身份）。 */

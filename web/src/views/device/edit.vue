@@ -35,18 +35,19 @@
           </el-form-item>
           <el-form-item v-if="isGb35114CertWay" label="服务端证书" prop="serverCertId">
             <el-select v-model="form.serverCertId" clearable style="float: left; width: 100%"
-                       placeholder="不绑定，使用平台默认服务端证书">
+                       placeholder="不绑定，使用平台的服务端证书">
               <el-option
                 v-for="item in serverCertList"
                 :key="item.id"
-                :label="`#${item.id} ${item.subjectCn || item.gbId || ''}${item.isDefault ? '（默认）' : ''}`"
+                :label="`#${item.id} ${item.subjectCn || item.gbId || ''}`"
                 :value="item.id"
               />
             </el-select>
             <div class="hint" style="font-size:12px;color:#909399;line-height:1.6;margin-top:4px;">
               平台签 sign2 用的私钥必须与摄像头里导入的平台证书公钥配对，否则摄像头验签失败、
               注册后拒绝对信令服务（表现为目录查询 403、通道同步不上）。<br />
-              摄像头只信任某一张特定证书时，在此绑定它；留空则跟随「证书管理-本地服务端证书」的默认证书。
+              摄像头只信任某一张特定证书时，在此绑定它；留空则使用「证书管理-本地服务端证书」
+              中的那张（该用途后端只允许存在一张，不存在选择歧义）。
             </div>
           </el-form-item>
           <el-form-item label="收流IP" prop="sdpIp">

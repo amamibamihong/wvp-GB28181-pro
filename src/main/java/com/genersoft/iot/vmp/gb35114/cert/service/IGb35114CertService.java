@@ -164,22 +164,17 @@ public interface IGb35114CertService {
      * 故障点会漂到设备侧。因此本方法<b>绝不跨密钥组回退</b>。
      *
      * <p>「多个证书」只允许是<b>同一密钥组内的多张</b>（有效期/签发者/序列号不同），
-     * 它们对设备完全等价。锚点优先取 {@code is_default=1} 的那张（运维对设备的承诺），
-     * 从未标记过默认时取最新的一张，再在锚点所在组内解析可用证书。
+     * 它们对设备完全等价。锚点取该用途下最新的一张未吊销记录，再在锚点所在组内解析可用证书。
      *
      * @return 可用的服务端证书；锚点已吊销、或其所在组内已无可用证书时返回 {@code null}
      */
     Gb35114Cert queryDefaultServerIdentity();
 
     /**
-     * 取「被显式标记为默认」的那张服务端证书原始记录，<b>不判断是否可用</b>。
-     *
-     * <p>与 {@link #queryDefaultServerIdentity()} 的区别：后者会跳过不可用的证书顺延到
-     * 下一张（可能是另一把密钥对），而签名身份的选择不能这么顺延 —— 设备存的是被标记
-     * 默认那张的公钥。调用方拿到本方法的记录后，可据此判断「承诺的证书是否还有效」，
-     * 并在同公钥指纹范围内寻找接替者。无标记时返回 {@code null}。
+     * 取指定 ID 的服务端证书，校验其确实可用（用途为 SERVER_IDENTITY、持有私钥、
+     * 未吊销、未过期）。不可用时返回 {@code null}。
      */
-    Gb35114Cert queryMarkedDefaultServerIdentity();
+    Gb35114Cert queryUsableServerIdentity(Integer certId);
 
     /**
      * 按「<b>密钥组</b>」解析可用的服务端证书。
@@ -198,15 +193,6 @@ public interface IGb35114CertService {
     Gb35114Cert resolveUsableServerIdentity(int certId);
 
     /**
-     * 取指定 ID 的服务端证书，校验其确实可用（用途为 SERVER_IDENTITY、持有私钥、
-     * 未吊销、未过期）。不可用时返回 {@code null}。
-     */
-    Gb35114Cert queryUsableServerIdentity(Integer certId);
-
-    /** 把某张服务端证书设为默认（同一时刻全局仅一张）。 */
-    void setDefaultServerIdentity(int certId);
-
-    /**
      * <b>复用现有密钥对</b>再签一张服务端证书：私钥不变，只重新签发证书。
      *
      * <p>新证书的公钥与源证书完全相同（{@link Gb35114Cert#getKeyFingerprint()} 一致），
@@ -223,6 +209,33 @@ public interface IGb35114CertService {
 
     /** 按公钥指纹查询同组服务端证书（同一个签名身份）。 */
     List<Gb35114Cert> queryServerIdentitiesByFingerprint(String keyFingerprint);
+
+    /**
+     * 解析本平台作为下级注册时使用的「本地客户端证书」（DEVICE_IDENTITY）。
+     *
+     * <p><b>该用途不唯一</b>：本平台可以同时接入多个上级，每个上级用自己的那张
+     * （证书里 CN 通常就是本平台在该上级处的国标编码）。因此解析规则是：
+     * <ol>
+     *   <li>{@code gbId} 非空时，先按 {@code gb_id} 精确匹配；</li>
+     *   <li>匹配不到（或 gbId 为空）时，若该用途下<b>只有一张</b>未吊销的证书，就用它；</li>
+     *   <li>仍有多张 —— <b>返回 null 并告警，绝不猜</b>。猜错等于用别的上级的身份去注册，
+     *       对方验签失败，而本平台日志上一切正常。</li>
+     * </ol>
+     *
+     * @param gbId 本平台向上注册的国标编码，可为 null
+     * @return 可用的证书；无候选或有歧义时返回 {@code null}
+     */
+    Gb35114Cert queryDeviceIdentity(String gbId);
+
+    /**
+     * 解析某个上级平台的「上级服务端证书」（TRUSTED_PLATFORM，仅公钥，用于验 sign2）。
+     *
+     * <p>与 {@link #queryDeviceIdentity(String)} 同理：该用途也不唯一（多个上级各有各的），
+     * 按 {@code serverGbId} 匹配 {@code gb_id}；匹配不到且只有一张时用它；有多张则返回 null。
+     *
+     * @param serverGbId 上级平台国标编码，可为 null
+     */
+    Gb35114Cert queryTrustedPlatformCert(String serverGbId);
 
     /** 加载证书 PEM 为 X509Certificate（不涉私钥）。 */
     X509Certificate loadCert(int id);

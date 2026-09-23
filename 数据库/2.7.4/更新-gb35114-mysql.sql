@@ -241,12 +241,14 @@ SELECT p.id, p.name, p.server_gb_id, p.register_way, p.device_cert_id, p.platfor
   FROM wvp_platform p WHERE p.enable = 1;
 
 -- ============================================================================
--- 多服务器证书支持：平台可以并存多张 SERVER_IDENTITY 证书，显式指定默认者，
--- 并允许按设备绑定它实际信任的那一张。
+-- 按设备绑定它实际信任的那张服务器证书。
 --
 -- 背景：UAS 签 sign2 时只能用一个私钥，而设备侧只信任它配置时导入的那张平台
 -- 证书的公钥。此前「按 id 倒序取最新」的隐式选择意味着新增一张服务器证书就会
 -- 静默顶掉旧证书，让所有按旧证书配置过的设备注册后立刻被 403 拒绝。
+-- 现在 SERVER_IDENTITY 由后端强制唯一（换发走「同密钥再签」原地更新），
+-- 未绑定设备的设备直接使用平台唯一的那张；此列只用于「设备信任的并非平台
+-- 当前签名身份」的例外情况。
 -- ============================================================================
 DROP PROCEDURE IF EXISTS `wvp_gb35114_multi_server_cert`;
 DELIMITER //
@@ -254,42 +256,47 @@ CREATE PROCEDURE `wvp_gb35114_multi_server_cert`()
 BEGIN
     IF NOT EXISTS (SELECT column_name FROM information_schema.columns
                    WHERE TABLE_SCHEMA = (SELECT DATABASE())
-                     AND table_name = 'wvp_gb35114_cert' AND column_name = 'is_default')
-    THEN
-        ALTER TABLE wvp_gb35114_cert ADD is_default tinyint(1) DEFAULT 0
-            COMMENT '是否默认服务器证书（仅对 purpose=SERVER_IDENTITY 有意义，全局至多一张为1）';
-    END IF;
-
-    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
-                   WHERE TABLE_SCHEMA = (SELECT DATABASE())
                      AND table_name = 'wvp_device' AND column_name = 'server_cert_id')
     THEN
         ALTER TABLE wvp_device ADD server_cert_id integer
-            COMMENT '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用默认证书）';
+            COMMENT '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用平台唯一的那张服务端证书）';
     END IF;
 END; //
 DELIMITER ;
 call wvp_gb35114_multi_server_cert();
 DROP PROCEDURE wvp_gb35114_multi_server_cert;
 
--- 默认证书初始化：沿用改造前「取最新一张有效 SERVER_IDENTITY」的行为，
--- 保证升级瞬间的签名身份与升级前完全一致。现场若设备信任的是更早的一张，
--- 请在「本地服务端证书」页把那张设为默认（或按设备绑定）。
-UPDATE wvp_gb35114_cert SET is_default = 0 WHERE purpose = 'SERVER_IDENTITY';
+-- ============================================================================
+-- 移除 is_default 列（如存在）。
+--
+-- 该列曾用于在「同一密钥对签出的多张服务端证书」之间挑锚点。现已改为：后端强制
+-- SERVER_IDENTITY 至多一条未吊销记录，换发走「同密钥再签」原地更新（不新增行，
+-- 证书 ID 恒定，配置文件与设备绑定按 ID 的引用永不悬空），于是「选哪张」这个问题
+-- 本身消失了，标记默认既无必要也无意义。
+--
+-- 存量的多行 SERVER_IDENTITY 不会被本脚本删除：本平台只保留一组密钥，但同组可以
+-- 有多张证书（换有效期/DN/签发者），它们公钥指纹相同、彼此可互换，都在用。
+-- 新代码取「id 最大的一张未吊销记录」作为签名身份。
+-- ============================================================================
+DROP PROCEDURE IF EXISTS `wvp_gb35114_drop_is_default`;
+DELIMITER //
+CREATE PROCEDURE `wvp_gb35114_drop_is_default`()
+BEGIN
+    IF EXISTS (SELECT column_name FROM information_schema.columns
+               WHERE TABLE_SCHEMA = (SELECT DATABASE())
+                 AND table_name = 'wvp_gb35114_cert' AND column_name = 'is_default')
+    THEN
+        ALTER TABLE wvp_gb35114_cert DROP COLUMN is_default;
+    END IF;
+END; //
+DELIMITER ;
+call wvp_gb35114_drop_is_default();
+DROP PROCEDURE wvp_gb35114_drop_is_default;
 
-UPDATE wvp_gb35114_cert SET is_default = 1
- WHERE purpose = 'SERVER_IDENTITY'
-   AND id = (SELECT id FROM (
-         SELECT MAX(id) AS id FROM wvp_gb35114_cert
-          WHERE purpose = 'SERVER_IDENTITY'
-            AND (revoked IS NULL OR revoked = 0)
-            AND cert_pem IS NOT NULL AND cert_pem != ''
-       ) t);
-
--- 核对：当前默认服务器证书
-SELECT id, gb_id, subject_cn, serial_number, not_after,
+-- 核对：当前服务端证书（按 id 倒序，第一条未吊销的即为签名身份）
+SELECT id, gb_id, subject_cn, serial_number, not_after, key_fingerprint,
        CASE WHEN key_pem IS NULL OR key_pem = '' THEN 0 ELSE 1 END AS has_key
-  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY is_default DESC, id DESC;
+  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY id DESC;
 
 -- ============================================================================
 -- 公钥指纹：标识「同一个 SM2 签名身份」。

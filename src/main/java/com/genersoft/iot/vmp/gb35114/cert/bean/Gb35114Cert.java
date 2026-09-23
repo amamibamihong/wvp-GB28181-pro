@@ -118,16 +118,6 @@ public class Gb35114Cert {
     @Schema(description = "公钥指纹（SM3）；相同表示同一个签名身份，可互换")
     private String keyFingerprint;
 
-    /**
-     * 是否为默认服务器证书。
-     *
-     * <p>只对 {@link #PURPOSE_SERVER_IDENTITY} 有意义：平台可以并存多张服务端证书，
-     * 但 UAS 签 sign2 时只能用一个私钥，因此必须有一张被显式指定为「未绑定设备的
-     * 设备注册时使用哪一张」。全局至多一张为 {@code true}。
-     */
-    @Schema(description = "是否默认服务器证书（仅 SERVER_IDENTITY 有意义）")
-    private Boolean isDefault;
-
     @Schema(description = "备注")
     private String remark;
 

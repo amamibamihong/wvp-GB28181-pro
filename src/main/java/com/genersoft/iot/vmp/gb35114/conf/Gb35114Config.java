@@ -17,16 +17,9 @@ public class Gb35114Config {
     /** 国密总开关。 */
     private boolean enabled = false;
 
-    /** 本平台作为下级向上级注册时使用的设备证书 ID（关联 wvp_gb35114_cert）。 */
-    private Integer deviceCertId;
-
-    /** 本平台作为平台（UAS）使用的服务器证书 ID（关联 wvp_gb35114_cert）。 */
-    private Integer serverCertId;
-
-    /** 本平台受信的上级平台证书 ID（验 sign2）。 */
-    private Integer platformCertId;
-
-    /** 私钥落地加密的对称密钥（至少 16 字节，AES）。 */
+    /**
+     * 私钥落地加密的对称密钥（至少 16 字节，AES）。
+     */
     private String keyEncryptPassword = "wvp-gb35114-default";
 
     /** 证书默认有效期（天）。 */

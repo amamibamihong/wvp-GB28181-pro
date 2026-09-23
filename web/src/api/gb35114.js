@@ -251,14 +251,6 @@ export function deleteCert(id) {
   })
 }
 
-/** 设为默认服务器证书：未绑定设备的设备注册时用它签 sign2 */
-export function setDefaultCert(id) {
-  return request({
-    method: 'post',
-    url: `/api/gb35114/cert/default/${id}`
-  })
-}
-
 /**
  * 复用现有密钥对再签一张服务端证书（公钥不变）。
  * 同组证书可互换，设备导入任一张皆可接入，换证书无需重新配置设备。

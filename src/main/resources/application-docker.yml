@@ -53,13 +53,9 @@ sip:
 gb35114:
     # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
     enabled: ${WVP_GB35114_ENABLED:false}
-    # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id），为空时 UAC 侧国密注册走 Digest
-    # 证书ID为空时可注释掉下面三行，避免空字符串绑定 Integer 失败；启用时填入 wvp_gb35114_cert.id
-    # device-cert-id: ${WVP_GB35114_DEVICE_CERT_ID}
-    # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
-    # server-cert-id: ${WVP_GB35114_SERVER_CERT_ID}
-    # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
-    # platform-cert-id: ${WVP_GB35114_PLATFORM_CERT_ID}
+    # 用哪张证书不由本文件指定：证书全部存在 wvp_gb35114_cert 表里，运行时按用途从库中解析
+    # （服务端证书取唯一的一张；下级接入多个上级时按上级国标编码区分）。
+    # 在配置文件里写证书 ID，证书一旦重建（主键自增不回退）就会变成悬空引用。
     # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
     key-encrypt-password: ${WVP_GB35114_KEY_PWD:wvp-gb35114-default}
     # [可选] 证书默认有效期（天）

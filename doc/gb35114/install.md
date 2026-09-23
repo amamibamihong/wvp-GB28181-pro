@@ -35,7 +35,7 @@
 ### 2.2 ⚠️ 这是**分阶段幂等迁移脚本**，不是一次性建表脚本
 
 脚本开头的 `CREATE TABLE IF NOT EXISTS` 只覆盖最初的表形态，
-**线上实际使用的列（`purpose` / `subject_dn` / `is_default` / `key_fingerprint` 等）
+**线上实际使用的列（`purpose` / `subject_dn` / `key_fingerprint` 等）
 是后续若干段存储过程通过 `ALTER TABLE ... ADD` 补上的**。
 
 因此：
@@ -52,7 +52,7 @@
 |---|---|
 | ① | 建 `wvp_gb35114_ca` / `wvp_gb35114_cert` 基础表；`wvp_device` 加 `register_way` / `cert_id`；`wvp_platform` 加 `device_cert_id` / `platform_cert_id` |
 | ② | 证书表加 `purpose` / `subject_dn` / DN 各段 / `csr_pem` / `remark` / `validity_days` / `key_usage`；CA 表加 `purpose` / `remark`；建索引 `idx_gb35114_cert_purpose`；**存量数据启发式归类**（按已有列推断 `purpose`） |
-| ③ | 证书表加 `is_default`；`wvp_device` 加 `server_cert_id`；初始化默认服务端证书 |
+| ③ | `wvp_device` 加 `server_cert_id`；**删除证书表的 `is_default` 列**（服务端证书已由后端强制唯一，不再需要"默认"标记） |
 | ④ | 证书表加 `key_fingerprint` + 索引 |
 | ⑤ | **删除 CA 表的 `name` 列**（CA 别名已废弃，身份改用证书主题 CN） |
 
@@ -80,13 +80,9 @@ mysql -h127.0.0.1 -P3306 -uroot -p -D wvp < 数据库/2.7.4/更新-gb35114-mysql
 gb35114:
   # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
   enabled: false
-  # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id）
-  # 为空时无法进行 UAC 侧国密注册（向上级注册仍走 Digest）
-  # device-cert-id:
-  # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
-  # server-cert-id:
-  # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
-  # platform-cert-id:
+  # 用哪张证书不由本文件指定：证书全部存在 wvp_gb35114_cert 表里，运行时按用途从库中解析
+  # （服务端证书取唯一的一张；下级接入多个上级时按上级国标编码区分）。
+  # 在配置文件里写证书 ID，证书一旦重建（主键自增不回退）就会变成悬空引用，且只在注册时才暴露。
   # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
   key-encrypt-password: wvp-gb35114-default
   # [可选] 证书默认有效期（天）
@@ -108,9 +104,6 @@ gb35114:
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `false` | 国密总开关。**关闭时整套 GB35114 逻辑短路**，不影响原有 Digest 注册 |
-| `device-cert-id` | 空 | UAC 侧签 `sign1` 用的本地客户端证书。为空时向上级注册走 Digest |
-| `server-cert-id` | 空 | UAS 侧签 `sign2` 用的本地服务端证书。不配则取证书表中 `is_default=1` 的那张 |
-| `platform-cert-id` | 空 | UAC 侧验 `sign2` 用的上级服务端证书 |
 | `key-encrypt-password` | `wvp-gb35114-default` | **私钥落地加密密钥，生产环境必须改**。改它不会自动重加密已有私钥 |
 | `cert-validity-days` | `3650` | 签发证书时的默认有效期 |
 | `reject-expired-cert` | `false` | **过期是否拒绝注册**。默认 false：过期只在页面标出，不拦截；置 true 则按日期硬拒绝 |
@@ -124,11 +117,18 @@ gb35114:
 >
 > **吊销不受此开关影响** —— 任何取值下都拒绝。
 
-> **`device-cert-id` / `server-cert-id` / `platform-cert-id` 是"全局兜底"**：
-> 级联可各自在编辑页绑定（`wvp_platform.device_cert_id` / `platform_cert_id`），
-> 设备可绑定信任的服务端证书（`wvp_device.server_cert_id`）。
-> 优先级：**设备级绑定 > 全局配置 > 证书表默认证书**。
-> 多上级场景建议在级联编辑页逐条绑定，不要只依赖全局配置。
+> **配置里没有 `device-cert-id` / `server-cert-id` / `platform-cert-id`**。
+> 曾经有过，但那是把数据库主键写死在 yml 里 —— 证书一旦重建（主键自增不回退）
+> 配置就指向不存在的行，且只在设备注册时才暴露。现在证书的存在与选择全由数据库承担：
+>
+> | 角色 | 解析规则 |
+> |---|---|
+> | 本地服务端证书（UAS 签 `sign2`） | 后端强制**唯一**（见 usage.md §2.4），未绑定设备的设备直接用这一张 |
+> | 本地客户端证书（UAC 签 `sign1`） | 不唯一（可接入多个上级）。按 `wvp_platform.device_cert_id` 绑定；未绑定时按上级国标编码匹配证书的 `gb_id`，只有一张则用它，多张则**拒绝猜测** |
+> | 上级服务端证书（UAC 验 `sign2`） | 同上，对应 `wvp_platform.platform_cert_id` |
+> | 设备信任的服务端证书 | 按 `wvp_device.server_cert_id` 绑定；未绑定则用平台唯一的那张 |
+>
+> 多上级场景**务必在级联编辑页逐条绑定**，不要依赖兜底。
 
 ### 3.2 三处配置文件都要同步
 
@@ -159,8 +159,8 @@ WVP_GB35114_CERT_VALIDITY_DAYS
 WVP_GB35114_REJECT_EXPIRED_CERT
 ```
 
-> Docker 版里 `device-cert-id` 等三项默认注释掉：空字符串绑定 `Integer` 会失败。
-> 需要时取消注释并填入 `wvp_gb35114_cert.id`。
+> Docker 版里 `gb35114:` 段同样不含证书 ID —— 证书全部从数据库解析，
+> 环境变量 `WVP_GB35114_*_CERT_ID` 也已随之取消。
 
 ---
 

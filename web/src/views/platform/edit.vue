@@ -87,7 +87,7 @@
               <el-select
                 v-model="value.deviceCertId"
                 style="width: 100%"
-                placeholder="本平台作下级注册用的设备证书（缺省用全局配置）"
+                placeholder="本平台作下级注册用的设备证书（接入多个上级时逐条绑定）"
                 clearable
                 filterable
               >
@@ -103,7 +103,7 @@
               <el-select
                 v-model="value.platformCertId"
                 style="width: 100%"
-                placeholder="受信上级平台证书（验sign2，缺省用全局配置）"
+                placeholder="受信上级平台证书（验sign2，接入多个上级时逐条绑定）"
                 clearable
                 filterable
               >

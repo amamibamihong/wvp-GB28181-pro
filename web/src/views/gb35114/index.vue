@@ -140,8 +140,6 @@
               <el-button v-if="scope.row.certPem" type="text" size="mini" @click="downloadFile('cert', scope.row)">证书</el-button>
               <el-button v-if="scope.row.certPem && scope.row.hasKey"
                          type="text" size="mini" style="color: #909399" @click="openReissue(scope.row)">同密钥再签</el-button>
-              <el-button v-if="scope.row.certPem && !scope.row.revoked && !scope.row.isDefault"
-                         type="text" size="mini" style="color: #409eff" @click="confirmSetDefault(scope.row)">设为默认</el-button>
               <el-button v-if="scope.row.certPem && !scope.row.revoked" type="text" size="mini" style="color: #e6a23c" @click="confirmRevoke(scope.row)">吊销</el-button>
               <el-button type="text" size="mini" style="color: #f56c6c" @click="confirmDeleteCert(scope.row)">删除</el-button>
             </template>
@@ -792,7 +790,7 @@ import {
   generateCa, importCa, listCa, deleteCa, downloadCa,
   createCsr, signPendingCsr, completePendingCsr, downloadCsr, selfSigned, importIdentity,
   issueFromCsr, reissueFromCsr, importPeer,
-  listCert, getCertPolicy, downloadCert, revokeCert, deleteCert, setDefaultCert, reissueServerIdentity,
+  listCert, getCertPolicy, downloadCert, revokeCert, deleteCert, reissueServerIdentity,
   PURPOSE_SERVER_IDENTITY, PURPOSE_DEVICE_IDENTITY, PURPOSE_ISSUED_DEVICE, PURPOSE_TRUSTED_PLATFORM,
   PURPOSE_LOCAL_CA, PURPOSE_TRUSTED_CA, PURPOSE_LABELS
 } from '@/api/gb35114'
@@ -1348,15 +1346,6 @@ export default {
         .then(() => {
           deleteCert(row.id).then(() => { this.$message.success('删除成功'); this.loadCertList() })
         }).catch(() => {})
-    },
-    confirmSetDefault(row) {
-      this.$confirm(
-        `确认把「${row.subjectCn || row.gbId}」设为默认服务端证书？未绑定设备的设备将用它签 sign2。` +
-        '若某台设备只信任另一张证书，请改为在该设备上绑定，不要改默认证书。',
-        '提示', { type: 'warning' }
-      ).then(() => {
-        setDefaultCert(row.id).then(() => { this.$message.success('已设为默认'); this.loadCertList() })
-      }).catch(() => {})
     },
     /** 复用源证书的密钥对再签一张（公钥不变，设备无需重新配置）。 */
     openReissue(row) {

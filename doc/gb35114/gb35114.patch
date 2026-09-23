@@ -28,10 +28,10 @@ index 4b28de9..7a2bddb 100644
      - [如何参与开发](_content/qa/development.md)
 diff --git a/doc/gb35114/design.md b/doc/gb35114/design.md
 new file mode 100644
-index 0000000..3528e7c
+index 0000000..d934865
 --- /dev/null
 +++ b/doc/gb35114/design.md
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,544 @@
 +<!-- GB35114 设计说明 -->
 +
 +# GB35114 设计说明
@@ -162,8 +162,27 @@ index 0000000..3528e7c
 +拒绝文案统一指向 `reissueServerIdentity`（**同密钥再签**）—— 它是唯一的换发路径，
 +天然复用密钥对，不触发守卫。
 +
++**"同密钥再签"是原地更新，不新增行**（`Gb35114CertMapper.updateServerIdentity`）：
++证书 ID 恒定，`wvp_device.server_cert_id`、`wvp_platform.device_cert_id` 等按 ID 的引用
++永不悬空。若改为新增行，ID 会变，这些引用立刻失效且只在设备注册时才暴露。
++
++**因此不存在"默认服务端证书"这个概念**：该用途至多一条未吊销记录，
++取它即可。早期版本的 `is_default` 列（用于在"同密钥对的多张证书"之间挑锚点）
++已随唯一性约束一并删除，页面上的「设为默认」入口也已去掉。
++
 +**守卫挂在"未吊销"上是为了留出应急通道**：密钥泄露 / 私钥丢失时，
 +先把该组全部吊销，守卫即失效，可以新建第二组。这正是"吊销"该有的语义。
++
++#### 约束二的例外：本地客户端证书与上级服务端证书**不唯一**
++
++`DEVICE_IDENTITY`（UAC 签 `sign1`）与 `TRUSTED_PLATFORM`（验 `sign2`）**不做唯一性约束** ——
++本平台作为下级可以**同时接入多个上级**，每个上级各有自己的一张。
++
++区分方式不是"标记默认"，而是**按业务对象绑定**：`wvp_platform.device_cert_id` /
++`platform_cert_id`。未绑定时按上级国标编码匹配证书的 `gb_id`；匹配不到且该用途
++只有一张则用它，有多张则**返回 null 并告警，绝不猜** ——
++猜错等于用别的上级的身份去注册（或拿别人的公钥去验签），对方必然验不过，
++而本平台日志上一切正常，故障点会漂到对端。
 +
 +#### 约束三：过期默认不拒绝，只提示
 +
@@ -252,10 +271,10 @@ index 0000000..3528e7c
 +优先级为：
 +
 +1. **设备级绑定** `wvp_device.server_cert_id` —— 运维对该设备的明确承诺；
-+2. **全局配置** `gb35114.server-cert-id`；
-+3. **证书表中 `is_default=1`** 的那张（从未指定过默认时回退为最新一张可用证书）。
++2. **证书表中唯一的那张 `SERVER_IDENTITY`** —— 该用途由后端强制唯一（见 §2.2），
++   因此不存在"选哪张"的歧义，也无需 `is_default` 标记。
 +
-+**三条路径共用同一条规则**：在"指定的那张证书所属的**密钥组**"内解析可用证书。
++**两条路径共用同一条规则**：在"指定的那张证书所属的**密钥组**"内解析可用证书。
 +指定的证书过期时，只要同组还有可用证书就继续用，设备无需重新配置；同组全过期才拒绝。
 +
 +这条规则不参与顺延的只有**吊销**（见 §2.2）。顺延**绝不跨密钥组** ——
@@ -438,7 +457,7 @@ index 0000000..3528e7c
 +| `cert_pem` / `key_pem` / `csr_pem` | 证书、私钥密文、待签发 CSR |
 +| `not_before` / `not_after` / `validity_days` | 有效期 |
 +| `key_usage` | X.509 KeyUsage 扩展 |
-+| `revoked` / `is_default` | 是否吊销 / 是否默认服务端证书 |
++| `revoked` | 是否吊销 |
 +| `key_fingerprint` | SM3 公钥指纹（同一签名身份可互换） |
 +| `remark` / `create_time` | 备注、创建时间 |
 +
@@ -559,7 +578,7 @@ index 0000000..3528e7c
 +实测空转速率可达每秒两千次，把 SIP 线程打满。限流后同一 CallId 超过 3 次挑战即放弃。
 diff --git a/doc/gb35114/install.md b/doc/gb35114/install.md
 new file mode 100644
-index 0000000..4eace02
+index 0000000..bfe16fd
 --- /dev/null
 +++ b/doc/gb35114/install.md
 @@ -0,0 +1,357 @@
@@ -600,7 +619,7 @@ index 0000000..4eace02
 +### 2.2 ⚠️ 这是**分阶段幂等迁移脚本**，不是一次性建表脚本
 +
 +脚本开头的 `CREATE TABLE IF NOT EXISTS` 只覆盖最初的表形态，
-+**线上实际使用的列（`purpose` / `subject_dn` / `is_default` / `key_fingerprint` 等）
++**线上实际使用的列（`purpose` / `subject_dn` / `key_fingerprint` 等）
 +是后续若干段存储过程通过 `ALTER TABLE ... ADD` 补上的**。
 +
 +因此：
@@ -617,7 +636,7 @@ index 0000000..4eace02
 +|---|---|
 +| ① | 建 `wvp_gb35114_ca` / `wvp_gb35114_cert` 基础表；`wvp_device` 加 `register_way` / `cert_id`；`wvp_platform` 加 `device_cert_id` / `platform_cert_id` |
 +| ② | 证书表加 `purpose` / `subject_dn` / DN 各段 / `csr_pem` / `remark` / `validity_days` / `key_usage`；CA 表加 `purpose` / `remark`；建索引 `idx_gb35114_cert_purpose`；**存量数据启发式归类**（按已有列推断 `purpose`） |
-+| ③ | 证书表加 `is_default`；`wvp_device` 加 `server_cert_id`；初始化默认服务端证书 |
++| ③ | `wvp_device` 加 `server_cert_id`；**删除证书表的 `is_default` 列**（服务端证书已由后端强制唯一，不再需要"默认"标记） |
 +| ④ | 证书表加 `key_fingerprint` + 索引 |
 +| ⑤ | **删除 CA 表的 `name` 列**（CA 别名已废弃，身份改用证书主题 CN） |
 +
@@ -645,13 +664,9 @@ index 0000000..4eace02
 +gb35114:
 +  # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
 +  enabled: false
-+  # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id）
-+  # 为空时无法进行 UAC 侧国密注册（向上级注册仍走 Digest）
-+  # device-cert-id:
-+  # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
-+  # server-cert-id:
-+  # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
-+  # platform-cert-id:
++  # 用哪张证书不由本文件指定：证书全部存在 wvp_gb35114_cert 表里，运行时按用途从库中解析
++  # （服务端证书取唯一的一张；下级接入多个上级时按上级国标编码区分）。
++  # 在配置文件里写证书 ID，证书一旦重建（主键自增不回退）就会变成悬空引用，且只在注册时才暴露。
 +  # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
 +  key-encrypt-password: wvp-gb35114-default
 +  # [可选] 证书默认有效期（天）
@@ -673,9 +688,6 @@ index 0000000..4eace02
 +| 配置项 | 默认 | 说明 |
 +|---|---|---|
 +| `enabled` | `false` | 国密总开关。**关闭时整套 GB35114 逻辑短路**，不影响原有 Digest 注册 |
-+| `device-cert-id` | 空 | UAC 侧签 `sign1` 用的本地客户端证书。为空时向上级注册走 Digest |
-+| `server-cert-id` | 空 | UAS 侧签 `sign2` 用的本地服务端证书。不配则取证书表中 `is_default=1` 的那张 |
-+| `platform-cert-id` | 空 | UAC 侧验 `sign2` 用的上级服务端证书 |
 +| `key-encrypt-password` | `wvp-gb35114-default` | **私钥落地加密密钥，生产环境必须改**。改它不会自动重加密已有私钥 |
 +| `cert-validity-days` | `3650` | 签发证书时的默认有效期 |
 +| `reject-expired-cert` | `false` | **过期是否拒绝注册**。默认 false：过期只在页面标出，不拦截；置 true 则按日期硬拒绝 |
@@ -689,11 +701,18 @@ index 0000000..4eace02
 +>
 +> **吊销不受此开关影响** —— 任何取值下都拒绝。
 +
-+> **`device-cert-id` / `server-cert-id` / `platform-cert-id` 是"全局兜底"**：
-+> 级联可各自在编辑页绑定（`wvp_platform.device_cert_id` / `platform_cert_id`），
-+> 设备可绑定信任的服务端证书（`wvp_device.server_cert_id`）。
-+> 优先级：**设备级绑定 > 全局配置 > 证书表默认证书**。
-+> 多上级场景建议在级联编辑页逐条绑定，不要只依赖全局配置。
++> **配置里没有 `device-cert-id` / `server-cert-id` / `platform-cert-id`**。
++> 曾经有过，但那是把数据库主键写死在 yml 里 —— 证书一旦重建（主键自增不回退）
++> 配置就指向不存在的行，且只在设备注册时才暴露。现在证书的存在与选择全由数据库承担：
++>
++> | 角色 | 解析规则 |
++> |---|---|
++> | 本地服务端证书（UAS 签 `sign2`） | 后端强制**唯一**（见 usage.md §2.4），未绑定设备的设备直接用这一张 |
++> | 本地客户端证书（UAC 签 `sign1`） | 不唯一（可接入多个上级）。按 `wvp_platform.device_cert_id` 绑定；未绑定时按上级国标编码匹配证书的 `gb_id`，只有一张则用它，多张则**拒绝猜测** |
++> | 上级服务端证书（UAC 验 `sign2`） | 同上，对应 `wvp_platform.platform_cert_id` |
++> | 设备信任的服务端证书 | 按 `wvp_device.server_cert_id` 绑定；未绑定则用平台唯一的那张 |
++>
++> 多上级场景**务必在级联编辑页逐条绑定**，不要依赖兜底。
 +
 +### 3.2 三处配置文件都要同步
 +
@@ -724,8 +743,8 @@ index 0000000..4eace02
 +WVP_GB35114_REJECT_EXPIRED_CERT
 +```
 +
-+> Docker 版里 `device-cert-id` 等三项默认注释掉：空字符串绑定 `Integer` 会失败。
-+> 需要时取消注释并填入 `wvp_gb35114_cert.id`。
++> Docker 版里 `gb35114:` 段同样不含证书 ID —— 证书全部从数据库解析，
++> 环境变量 `WVP_GB35114_*_CERT_ID` 也已随之取消。
 +
 +---
 +
@@ -1155,10 +1174,10 @@ index 0000000..4647f75
 +> `register_way` 改回 1，设备侧需要同步切回摘要认证。
 diff --git a/doc/gb35114/usage.md b/doc/gb35114/usage.md
 new file mode 100644
-index 0000000..546dd92
+index 0000000..6fe2806
 --- /dev/null
 +++ b/doc/gb35114/usage.md
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,436 @@
 +<!-- GB35114 使用说明 -->
 +
 +# GB35114 使用说明
@@ -1254,17 +1273,23 @@ index 0000000..546dd92
 +而且平台日志上一切正常（确实签了名，只是用错了身份），故障点会漂到设备侧。
 +所以换密钥对必须由运维显式操作，不能是"新建一张"这种顺手动作的副作用。
 +
-+### 2.4 「设为默认」
++### 2.4 服务端证书只有一张
 +
-+平台可以并存多张服务端证书（同一密钥对的不同"外衣"），`默认` 列标记出
-+**设备应该导入哪一张的公钥**。
++`SERVER_IDENTITY`（本地服务端证书）**由后端强制唯一**：已有未吊销的一张时，
++新建/自签/导入入口都会被拒绝，唯一的新增路径是操作列的「**同密钥再签**」
++（复用现有密钥对、原地更新原记录，证书 ID 不变）。
 +
-+- 设备未绑定具体证书时，UAS 握手用默认证书的密钥对签 `sign2`；
-+- 默认证书过期时，会自动顺延到**同密钥组**内的其它可用证书，设备无需重新配置；
++因此**页面上没有「设为默认」**，也不需要 —— 不存在"选哪张"的问题。
++
++- 设备未绑定具体证书时，UAS 握手用这一张的密钥对签 `sign2`；
++- 它过期时，会自动顺延到**同密钥组**内的其它可用证书，设备无需重新配置；
 +- **顺延绝不跨密钥组**。
 +
-+> 多台设备信任不同证书时，在**设备编辑页**逐台绑定 `server_cert_id`，
-+> 比依赖全局默认更稳。
++> 唯一性挂在"**未吊销**"上，应急路径因此是通的：密钥泄露时把该组全部吊销，
++> 即可新建第二组。详见 §2.5。
++
++> 例外情况：某台设备信任的**不是**平台当前签名身份（比如换过密钥对但没重新配置该设备），
++> 在**设备编辑页**给它单独绑定 `server_cert_id` 即可，不影响其它设备。
 +
 +### 2.5 应急：密钥泄露 / 私钥丢失
 +
@@ -1351,8 +1376,12 @@ index 0000000..546dd92
 +- `GB35114 设备证书` 选这张**本地客户端证书**（`wvp_platform.device_cert_id`）；
 +- `GB35114 上级平台证书` 选上一节导入的**上级服务端证书**（`wvp_platform.platform_cert_id`）。
 +
-+不绑定时回退到 `application.yml` 里的全局 `gb35114.device-cert-id` / `platform-cert-id`。
-+**多上级场景务必逐条绑定**，否则所有级联共用一份全局配置，容易选错。
++不绑定时**从证书表按上级国标编码解析**：先匹配证书的 `gb_id`，匹配不到且该用途
++只有一张时就用它，有多张则**拒绝猜测并告警**（宁可不签名，也不用错身份）。
++
++> 本平台作为下级可以**同时接入多个上级**，每个上级绑自己的一张 `DEVICE_IDENTITY`
++> 与 `TRUSTED_PLATFORM`。多上级场景**务必逐条绑定** —— 不绑定时只能靠"该用途只有一张"
++> 兜底，接入第二个上级后就没有兜底了。
 +
 +证书下拉里每项都带有效期与状态（如 `· 有效至 2036-09-13 10:00:00` 或 `· 已过期`），
 +多张证书时靠它区分。
@@ -1502,7 +1531,7 @@ index 0000000..546dd92
 +
 +| 字段 | 为什么不再展示 |
 +|---|---|
-+| `默认`（服务端证书） | 同一密钥对的多张证书公钥相同、对设备完全等价，标哪张都一样。仍可用操作列的「设为默认」按钮指定 |
++| `默认`（服务端证书） | 该列已随「服务端证书后端强制唯一」一并删除。只有一张，没有可标记的对象 |
 +| `私钥` | 只加密保存，永不下发。"同密钥再签"按钮的显隐已经表达了"这张有没有私钥" |
 +| `密钥用途` | **不参与任何判定**，只在签发时写进 X.509 扩展。签发表单也一并去掉，固定用 GB35114 要求的 `digitalSignature` |
 +| `使用中`（本地CA） | 删除 CA 时后端会校验引用并拒绝，页面不必预先标一遍 |
@@ -1882,10 +1911,10 @@ index 0000000..cdda868
 +  config: classpath:logback-spring.xml
 diff --git a/docker/gb35114-deploy/config/application.yml b/docker/gb35114-deploy/config/application.yml
 new file mode 100644
-index 0000000..fa9893a
+index 0000000..a9773d6
 --- /dev/null
 +++ b/docker/gb35114-deploy/config/application.yml
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,92 @@
 +# GB35114 测试部署外置配置
 +# 容器内网络：mysql=wvp-gb35114-mysql，redis=wvp-gb35114-redis
 +# HTTP 端口 18978，SIP 端口 5060
@@ -1945,12 +1974,8 @@ index 0000000..fa9893a
 +gb35114:
 +  # 国密总开关
 +  enabled: true
-+  # 本平台作为下级向上级注册使用的设备证书ID（在 web 界面签发后回填）
-+  # device-cert-id:
-+  # 本平台作为 UAS 使用的服务器证书ID（双向时配置）
-+  # server-cert-id:
-+  # 受信上级平台证书ID（UAC 验 sign2）
-+  # platform-cert-id:
++  # 用哪张证书不由本文件指定：证书存在 wvp_gb35114_cert 表里，运行时按角色从库中解析，
++  # 结果缓存在内存、证书变更时同步刷新。在配置文件里写证书 ID，证书一重建就会变成悬空引用。
 +  # 私钥落地加密密钥（生产环境务必修改）
 +  key-encrypt-password: ${WVP_GB35114_KEY_PWD}
 +  # 证书默认有效期（天）
@@ -2562,7 +2587,7 @@ index c1c515d..27b772e 100755
  
              sipSender.transmitRequest(parentPlatform.getDeviceIp(), request, (event)->{
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb28181/transmit/event/request/impl/RegisterRequestProcessor.java b/src/main/java/com/genersoft/iot/vmp/gb28181/transmit/event/request/impl/RegisterRequestProcessor.java
-index 04fe70a..dea1930 100755
+index 04fe70a..aa03b86 100755
 --- a/src/main/java/com/genersoft/iot/vmp/gb28181/transmit/event/request/impl/RegisterRequestProcessor.java
 +++ b/src/main/java/com/genersoft/iot/vmp/gb28181/transmit/event/request/impl/RegisterRequestProcessor.java
 @@ -14,6 +14,11 @@ import com.genersoft.iot.vmp.gb28181.transmit.SIPSender;
@@ -2644,9 +2669,9 @@ index 04fe70a..dea1930 100755
 +        // 设备签名 sign1 时用的就是 sip.id，这里必须一致，否则报 server id mismatch。
 +        //
 +        // 签名身份必须与「该设备配置时导入的平台证书」配对，否则设备验 sign2 失败并
-+        // 拒绝对后续信令服务。平台可并存多张服务端证书，故优先取设备级绑定；
-+        // 未绑定时由 Gb35114SecurityService 回退到全局配置/默认证书。
-+        // 绑定/配置的证书若已吊销或过期，这里会抛异常并回 403 —— 过期即拒绝接入，
++        // 拒绝对后续信令服务。优先取设备级绑定；未绑定时用证书表中唯一的那张服务端证书
++        // （该用途由后端强制唯一，见 Gb35114SecurityService#platformStateMachine）。
++        // 绑定的证书若已吊销或同密钥组内已无可用证书，这里会抛异常并回 403，
 +        // 不做「换一张证书再签」的静默降级（那会让设备侧验签失败，故障点漂到设备侧）。
 +        Integer deviceServerCertId = device == null ? null : device.getServerCertId();
 +        Gb35114PlatformStateMachine machine;
@@ -2935,10 +2960,10 @@ index 0000000..3d8544a
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/cert/bean/Gb35114Cert.java b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/bean/Gb35114Cert.java
 new file mode 100644
-index 0000000..c78c5de
+index 0000000..75c7d4a
 --- /dev/null
 +++ b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/bean/Gb35114Cert.java
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,185 @@
 +package com.genersoft.iot.vmp.gb35114.cert.bean;
 +
 +import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -3059,16 +3084,6 @@ index 0000000..c78c5de
 +    @Schema(description = "公钥指纹（SM3）；相同表示同一个签名身份，可互换")
 +    private String keyFingerprint;
 +
-+    /**
-+     * 是否为默认服务器证书。
-+     *
-+     * <p>只对 {@link #PURPOSE_SERVER_IDENTITY} 有意义：平台可以并存多张服务端证书，
-+     * 但 UAS 签 sign2 时只能用一个私钥，因此必须有一张被显式指定为「未绑定设备的
-+     * 设备注册时使用哪一张」。全局至多一张为 {@code true}。
-+     */
-+    @Schema(description = "是否默认服务器证书（仅 SERVER_IDENTITY 有意义）")
-+    private Boolean isDefault;
-+
 +    @Schema(description = "备注")
 +    private String remark;
 +
@@ -3136,10 +3151,10 @@ index 0000000..c78c5de
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/cert/controller/Gb35114CertController.java b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/controller/Gb35114CertController.java
 new file mode 100644
-index 0000000..7b62b71
+index 0000000..799fef6
 --- /dev/null
 +++ b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/controller/Gb35114CertController.java
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,318 @@
 +package com.genersoft.iot.vmp.gb35114.cert.controller;
 +
 +import com.genersoft.iot.vmp.conf.security.JwtUtils;
@@ -3189,7 +3204,7 @@ index 0000000..7b62b71
 +    private IGb35114CertService certService;
 +
 +    /**
-+     * UAS 状态机持有签名身份与已协商的 VKEK。证书新增/吊销/删除/切换默认后必须丢弃
++     * UAS 状态机持有签名身份与已协商的 VKEK。证书新增/吊销/删除/换发后必须丢弃
 +     * 缓存的状态机，否则会继续用旧私钥签 sign2 —— 设备验签失败即拒绝对后续信令服务。
 +     */
 +    @Autowired
@@ -3198,9 +3213,14 @@ index 0000000..7b62b71
 +    @Autowired
 +    private Gb35114Config config;
 +
-+    /** 丢弃全部 UAS 状态机缓存，下次注册时按最新证书集重建。 */
++    /**
++     * 丢弃全部证书状态机缓存（UAS + UAC），下次注册时按最新证书集重建。
++     *
++     * <p>「同密钥再签」是原地更新（证书 ID 不变），复合键不变，所以不能只清 UAS 侧 ——
++     * 级联侧的 UAC 状态机会继续持有换发前的旧证书身份。
++     */
 +    private void resetPlatformStateMachines() {
-+        gb35114SecurityService.invalidateAllPlatformStateMachines();
++        gb35114SecurityService.invalidateAllCertStateMachines();
 +    }
 +
 +    /**
@@ -3418,15 +3438,6 @@ index 0000000..7b62b71
 +        return WVPResult.success();
 +    }
 +
-+    @Operation(summary = "设为默认服务器证书（未绑定设备的设备注册时使用该证书签 sign2）",
-+            security = @SecurityRequirement(name = JwtUtils.HEADER))
-+    @PostMapping("/default/{id}")
-+    public WVPResult<?> setDefault(@PathVariable int id) {
-+        certService.setDefaultServerIdentity(id);
-+        resetPlatformStateMachines();
-+        return WVPResult.success();
-+    }
-+
 +    @Operation(summary = "复用现有密钥对再签一张服务端证书（公钥不变，设备无需重新配置）",
 +            security = @SecurityRequirement(name = JwtUtils.HEADER))
 +    @PostMapping("/reissue/{sourceId}")
@@ -3517,10 +3528,10 @@ index 0000000..f20acc7
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/cert/dao/Gb35114CertMapper.java b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/dao/Gb35114CertMapper.java
 new file mode 100644
-index 0000000..73ced88
+index 0000000..f36f7e7
 --- /dev/null
 +++ b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/dao/Gb35114CertMapper.java
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,189 @@
 +package com.genersoft.iot.vmp.gb35114.cert.dao;
 +
 +import com.genersoft.iot.vmp.gb35114.cert.bean.Gb35114Cert;
@@ -3540,7 +3551,7 @@ index 0000000..73ced88
 +    String LITE_COLUMNS =
 +            " id, purpose, type, gb_id, subject_cn, subject_dn, country, province, locality, " +
 +            " organization, organizational_unit, serial_number, ca_id, cert_pem, csr_pem, " +
-+            " not_before, not_after, validity_days, key_usage, revoked, is_default, key_fingerprint, " +
++            " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
 +            " remark, create_time, " +
 +            " CASE WHEN key_pem IS NULL OR key_pem = '' THEN 0 ELSE 1 END AS has_key ";
 +
@@ -3548,18 +3559,18 @@ index 0000000..73ced88
 +    String LITE_COLUMNS_DM =
 +            " id, purpose, type, gb_id, subject_cn, subject_dn, country, province, locality, " +
 +            " organization, organizational_unit, serial_number, ca_id, cert_pem, csr_pem, " +
-+            " not_before, not_after, validity_days, key_usage, revoked, is_default, key_fingerprint, " +
++            " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
 +            " remark, create_time, " +
 +            " CASE WHEN key_pem IS NULL OR LENGTH(key_pem) = 0 THEN 0 ELSE 1 END AS has_key ";
 +
 +    @Insert("INSERT INTO wvp_gb35114_cert (purpose, type, gb_id, subject_cn, subject_dn, country, province, " +
 +            " locality, organization, organizational_unit, serial_number, ca_id, cert_pem, key_pem, csr_pem, " +
-+            " not_before, not_after, validity_days, key_usage, revoked, is_default, key_fingerprint, " +
++            " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
 +            " remark, create_time) " +
 +            " VALUES (#{purpose}, #{type}, #{gbId}, #{subjectCn}, #{subjectDn}, #{country}, #{province}, " +
 +            " #{locality}, #{organization}, #{organizationalUnit}, #{serialNumber}, #{caId}, #{certPem}, " +
 +            " #{keyPem}, #{csrPem}, #{notBefore}, #{notAfter}, #{validityDays}, #{keyUsage}, #{revoked}, " +
-+            " #{isDefault}, #{keyFingerprint}, #{remark}, #{createTime})")
++            " #{keyFingerprint}, #{remark}, #{createTime})")
 +    @Options(useGeneratedKeys = true, keyProperty = "id")
 +    int add(Gb35114Cert cert);
 +
@@ -3634,28 +3645,45 @@ index 0000000..73ced88
 +    @Update(value = "UPDATE wvp_gb35114_cert SET revoked=#{revoked} WHERE id=#{id}", databaseId = "dm")
 +    int updateRevoked(@Param("id") int id, @Param("revoked") boolean revoked);
 +
-+    /** 清除全部默认标记（仅服务器证书维度），与 {@link #markDefault} 配合实现「唯一默认」。 */
-+    @Update("UPDATE wvp_gb35114_cert SET is_default=0 WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "'")
-+    @Update(value = "UPDATE wvp_gb35114_cert SET is_default=0 WHERE purpose='" +
-+            Gb35114Cert.PURPOSE_SERVER_IDENTITY + "'", databaseId = "dm")
-+    int clearDefault();
-+
-+    /** 置某张服务器证书为默认。 */
-+    @Update("UPDATE wvp_gb35114_cert SET is_default=1 WHERE id=#{id}")
-+    @Update(value = "UPDATE wvp_gb35114_cert SET is_default=1 WHERE id=#{id}", databaseId = "dm")
-+    int markDefault(@Param("id") int id);
++    /**
++     * 原地换发：更新已有记录的证书内容，<b>不新增行</b>。
++     *
++     * <p>「同密钥再签」走这里。新增行会让证书 ID 变化，而配置文件、{@code wvp_device.server_cert_id}、
++     * {@code wvp_platform.device_cert_id} 等处都是按 ID 引用的 —— ID 一变，这些引用立刻悬空，
++     * 且只在注册时才暴露。原地更新让 ID 恒定，引用永不失效。
++     *
++     * <p>不动 {@code key_pem}（复用同一密钥对）与 {@code csr_pem}（CSR 未变）。
++     */
++    @Update("UPDATE wvp_gb35114_cert SET cert_pem=#{certPem}, serial_number=#{serialNumber}, " +
++            " subject_cn=#{subjectCn}, subject_dn=#{subjectDn}, ca_id=#{caId}, " +
++            " not_before=#{notBefore}, not_after=#{notAfter}, validity_days=#{validityDays}, " +
++            " key_usage=#{keyUsage}, key_fingerprint=#{keyFingerprint}, revoked=0 " +
++            " WHERE id=#{id}")
++    @Update(value = "UPDATE wvp_gb35114_cert SET cert_pem=#{certPem}, serial_number=#{serialNumber}, " +
++            " subject_cn=#{subjectCn}, subject_dn=#{subjectDn}, ca_id=#{caId}, " +
++            " not_before=#{notBefore}, not_after=#{notAfter}, validity_days=#{validityDays}, " +
++            " key_usage=#{keyUsage}, key_fingerprint=#{keyFingerprint}, revoked=0 " +
++            " WHERE id=#{id}", databaseId = "dm")
++    int updateServerIdentity(@Param("id") int id, @Param("certPem") String certPem,
++                             @Param("serialNumber") String serialNumber,
++                             @Param("subjectCn") String subjectCn, @Param("subjectDn") String subjectDn,
++                             @Param("caId") Integer caId,
++                             @Param("notBefore") String notBefore, @Param("notAfter") String notAfter,
++                             @Param("validityDays") Integer validityDays,
++                             @Param("keyUsage") String keyUsage,
++                             @Param("keyFingerprint") String keyFingerprint);
 +
 +    /**
-+     * 查默认服务器证书（按 is_default 过滤，按 id 倒序兜底）。
++     * 查全部服务端证书（按 id 倒序，最新的在前）。
 +     *
 +     * <p>吊销/有效期/私钥的过滤放在 Java 层，规避三方言布尔与 clob 差异。
 +     */
 +    @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert " +
 +            " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' " +
-+            " ORDER BY is_default DESC, id DESC")
++            " ORDER BY id DESC")
 +    @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert " +
 +            " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' " +
-+            " ORDER BY is_default DESC, id DESC", databaseId = "dm")
++            " ORDER BY id DESC", databaseId = "dm")
 +    List<Gb35114Cert> queryServerIdentities();
 +
 +    /** 按公钥指纹查同组证书（同一个签名身份）。 */
@@ -3695,10 +3723,10 @@ index 0000000..73ced88
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/cert/service/IGb35114CertService.java b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/service/IGb35114CertService.java
 new file mode 100644
-index 0000000..5024431
+index 0000000..463b263
 --- /dev/null
 +++ b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/service/IGb35114CertService.java
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,281 @@
 +package com.genersoft.iot.vmp.gb35114.cert.service;
 +
 +import com.genersoft.iot.vmp.gb35114.cert.bean.Gb35114Ca;
@@ -3873,14 +3901,10 @@ index 0000000..5024431
 +    Gb35114Cert queryDefaultServerIdentity();
 +
 +    /**
-+     * 取「被显式标记为默认」的那张服务端证书原始记录，<b>不判断是否可用</b>。
-+     *
-+     * <p>与 {@link #queryDefaultServerIdentity()} 的区别：后者会跳过不可用的证书顺延到
-+     * 下一张（可能是另一把密钥对），而签名身份的选择不能这么顺延 —— 设备存的是被标记
-+     * 默认那张的公钥。调用方拿到本方法的记录后，可据此判断「承诺的证书是否还有效」，
-+     * 并在同公钥指纹范围内寻找接替者。无标记时返回 {@code null}。
++     * 取指定 ID 的服务端证书，校验其确实可用（用途为 SERVER_IDENTITY、持有私钥、
++     * 未吊销、未过期）。不可用时返回 {@code null}。
 +     */
-+    Gb35114Cert queryMarkedDefaultServerIdentity();
++    Gb35114Cert queryUsableServerIdentity(Integer certId);
 +
 +    /**
 +     * 按「<b>密钥组</b>」解析可用的服务端证书。
@@ -3899,15 +3923,6 @@ index 0000000..5024431
 +    Gb35114Cert resolveUsableServerIdentity(int certId);
 +
 +    /**
-+     * 取指定 ID 的服务端证书，校验其确实可用（用途为 SERVER_IDENTITY、持有私钥、
-+     * 未吊销、未过期）。不可用时返回 {@code null}。
-+     */
-+    Gb35114Cert queryUsableServerIdentity(Integer certId);
-+
-+    /** 把某张服务端证书设为默认（同一时刻全局仅一张）。 */
-+    void setDefaultServerIdentity(int certId);
-+
-+    /**
 +     * <b>复用现有密钥对</b>再签一张服务端证书：私钥不变，只重新签发证书。
 +     *
 +     * <p>新证书的公钥与源证书完全相同（{@link Gb35114Cert#getKeyFingerprint()} 一致），
@@ -3924,6 +3939,33 @@ index 0000000..5024431
 +
 +    /** 按公钥指纹查询同组服务端证书（同一个签名身份）。 */
 +    List<Gb35114Cert> queryServerIdentitiesByFingerprint(String keyFingerprint);
++
++    /**
++     * 解析本平台作为下级注册时使用的「本地客户端证书」（DEVICE_IDENTITY）。
++     *
++     * <p><b>该用途不唯一</b>：本平台可以同时接入多个上级，每个上级用自己的那张
++     * （证书里 CN 通常就是本平台在该上级处的国标编码）。因此解析规则是：
++     * <ol>
++     *   <li>{@code gbId} 非空时，先按 {@code gb_id} 精确匹配；</li>
++     *   <li>匹配不到（或 gbId 为空）时，若该用途下<b>只有一张</b>未吊销的证书，就用它；</li>
++     *   <li>仍有多张 —— <b>返回 null 并告警，绝不猜</b>。猜错等于用别的上级的身份去注册，
++     *       对方验签失败，而本平台日志上一切正常。</li>
++     * </ol>
++     *
++     * @param gbId 本平台向上注册的国标编码，可为 null
++     * @return 可用的证书；无候选或有歧义时返回 {@code null}
++     */
++    Gb35114Cert queryDeviceIdentity(String gbId);
++
++    /**
++     * 解析某个上级平台的「上级服务端证书」（TRUSTED_PLATFORM，仅公钥，用于验 sign2）。
++     *
++     * <p>与 {@link #queryDeviceIdentity(String)} 同理：该用途也不唯一（多个上级各有各的），
++     * 按 {@code serverGbId} 匹配 {@code gb_id}；匹配不到且只有一张时用它；有多张则返回 null。
++     *
++     * @param serverGbId 上级平台国标编码，可为 null
++     */
++    Gb35114Cert queryTrustedPlatformCert(String serverGbId);
 +
 +    /** 加载证书 PEM 为 X509Certificate（不涉私钥）。 */
 +    X509Certificate loadCert(int id);
@@ -3968,10 +4010,10 @@ index 0000000..5024431
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/cert/service/impl/Gb35114CertServiceImpl.java b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/service/impl/Gb35114CertServiceImpl.java
 new file mode 100644
-index 0000000..167c026
+index 0000000..1453521
 --- /dev/null
 +++ b/src/main/java/com/genersoft/iot/vmp/gb35114/cert/service/impl/Gb35114CertServiceImpl.java
-@@ -0,0 +1,1504 @@
+@@ -0,0 +1,1500 @@
 +package com.genersoft.iot.vmp.gb35114.cert.service.impl;
 +
 +import com.genersoft.iot.vmp.gb35114.cert.bean.Gb35114Ca;
@@ -4235,7 +4277,6 @@ index 0000000..167c026
 +            cert.setKeyPem(Gb35114KeyProtector.encrypt(config.getKeyEncryptPassword(), csr.keyPem));
 +            cert.setCertPem(null);
 +            cert.setValidityDays(validityDays);
-+            cert.setIsDefault(false);
 +            certMapper.add(cert);
 +            return cert;
 +        } catch (Exception e) {
@@ -4282,7 +4323,6 @@ index 0000000..167c026
 +                    caId, validityDays, normalizeKeyUsage(cert),
 +                    fingerprintOf(issued.certificate));
 +            Gb35114Cert signed = certMapper.queryLite(certId);
-+            claimDefaultIfFirstServerIdentity(signed);
 +            return signed;
 +        } catch (Exception e) {
 +            log.error("[GB35114] 签发待签发证书失败", e);
@@ -4317,7 +4357,6 @@ index 0000000..167c026
 +                    resolveIssuerCaId(x509), cert.getValidityDays(), normalizeKeyUsage(cert),
 +                    fingerprintOf(x509));
 +            Gb35114Cert completed = certMapper.queryLite(certId);
-+            claimDefaultIfFirstServerIdentity(completed);
 +            return completed;
 +        } catch (Exception e) {
 +            log.error("[GB35114] 回填证书失败", e);
@@ -4473,8 +4512,7 @@ index 0000000..167c026
 +     * 落库后重新读一遍列表列再返回。
 +     *
 +     * <p>新增/签发接口返回的是内存里刚拼好的对象，缺少只有 SQL 才产生的派生列
-+     * （{@code has_key} 是 {@code CASE WHEN} 算出来的、{@code is_default} 可能被
-+     * {@link #claimDefaultIfFirstServerIdentity} 改过），直接返回会让前端看到
++     * （{@code has_key} 是 {@code CASE WHEN} 算出来的），直接返回会让前端看到
 +     * {@code hasKey=null}，与列表接口的自相矛盾。
 +     */
 +    private Gb35114Cert reload(Gb35114Cert cert) {
@@ -4548,36 +4586,28 @@ index 0000000..167c026
 +     * 之间挑用，等于悄悄换掉设备信任的公钥，设备验 sign2 必然失败，而平台日志上一切正常
 +     * —— 故障点会漂到设备侧，极难定位。所以这里<b>绝不跨密钥组回退</b>。
 +     *
-+     * <p>「多个证书」只允许是<b>同一密钥组内的多张</b>（有效期/签发者/序列号不同），
-+     * 它们对设备完全等价。因此本方法先在组内选出「锚点」，再用
-+     * {@link #resolveUsableServerIdentity(int)} 在锚点所在组内找一张真正可用的。
++     * <p><b>不存在「选哪一张」的问题</b>：{@code SERVER_IDENTITY} 由后端强制唯一
++     * （见 {@link #assertNoActiveServerIdentity}），换发走「同密钥再签」原地更新，
++     * 所以该用途下至多一条未吊销记录，取它即可。早期版本用 {@code is_default} 列
++     * 在「同密钥对的多张证书」之间挑锚点，现已随唯一性约束一并删除。
 +     *
-+     * <p>锚点优先取<b>被显式标记为默认</b>的那张：它是运维对设备的承诺。从未标记过默认时
-+     * （例如存量数据）取最新的一张，此时不存在承诺，挑到哪张都不算背信。
-+     *
-+     * @return 可用的服务端证书；锚点已吊销、或其所在组内已无可用证书时返回 {@code null}
++     * @return 可用的服务端证书；已吊销、或（严格策略下）已过期时返回 {@code null}
 +     */
 +    @Override
 +    public Gb35114Cert queryDefaultServerIdentity() {
-+        Gb35114Cert anchor = queryMarkedDefaultServerIdentity();
-+        if (anchor == null) {
-+            List<Gb35114Cert> list = certMapper.queryServerIdentities();
-+            if (list == null || list.isEmpty()) {
-+                return null;
-+            }
-+            anchor = list.get(0); // 列表按 is_default DESC, id DESC，无标记时即最新一张
++        List<Gb35114Cert> list = certMapper.queryServerIdentities();
++        if (list == null || list.isEmpty()) {
++            return null;
 +        }
-+        // 组内解析：锚点自身可用就返回它；不可用则找同公钥指纹的兄弟证书。
-+        // 注意锚点若已吊销，resolveUsableServerIdentity 直接返回 null 而不顺延 —— 吊销即停用。
-+        return resolveUsableServerIdentity(anchor.getId());
-+    }
-+
-+    @Override
-+    public Gb35114Cert queryMarkedDefaultServerIdentity() {
-+        for (Gb35114Cert cert : certMapper.queryServerIdentities()) {
-+            if (Boolean.TRUE.equals(cert.getIsDefault())) {
-+                return cert;
++        // 按 id 倒序，取第一条未吊销的。唯一性约束下这里通常只有一条；
++        // 存量数据可能有多条（唯一性守卫是后加的），取最新的一条兼容之。
++        for (Gb35114Cert cert : list) {
++            if (Boolean.TRUE.equals(cert.getRevoked())) {
++                continue;
 +            }
++            // 组内解析：证书不可用时按公钥指纹找同密钥对的兄弟证书。
++            // 注意已吊销的证书 resolveUsableServerIdentity 直接返回 null 而不顺延 —— 吊销即停用。
++            return resolveUsableServerIdentity(cert.getId());
 +        }
 +        return null;
 +    }
@@ -4627,25 +4657,6 @@ index 0000000..167c026
 +    }
 +
 +    @Override
-+    public void setDefaultServerIdentity(int certId) {
-+        Gb35114Cert cert = certMapper.queryLite(certId);
-+        if (cert == null) {
-+            throw new IllegalArgumentException("证书 #" + certId + " 不存在");
-+        }
-+        if (!Gb35114Cert.PURPOSE_SERVER_IDENTITY.equals(cert.getPurpose())) {
-+            throw new IllegalArgumentException("证书 #" + certId + " 用途为 " + cert.getPurpose()
-+                    + "，只有本地服务端证书可以设为默认");
-+        }
-+        if (!isUsableServerIdentity(cert, DateUtil.getNow())) {
-+            throw new IllegalArgumentException("证书 #" + certId
-+                    + " 不可用（需持有私钥、未吊销、未过期），不能设为默认");
-+        }
-+        // 先清后置，保证全局至多一张默认
-+        certMapper.clearDefault();
-+        certMapper.markDefault(certId);
-+    }
-+
-+    @Override
 +    public Gb35114Cert reissueServerIdentity(int sourceCertId, Gb35114Cert profile,
 +                                             Integer caId, int validityDays) {
 +        try {
@@ -4690,25 +4701,20 @@ index 0000000..167c026
 +                        publicKey, notBefore, notAfter, keyUsageBits(profile));
 +            }
 +
-+            Gb35114Cert cert = baseRecord(profile);
-+            cert.setPurpose(Gb35114Cert.PURPOSE_SERVER_IDENTITY);
-+            cert.setType(Gb35114Cert.TYPE_SERVER);
-+            cert.setSerialNumber(issued.certificate.getSerialNumber().toString(16));
-+            cert.setCaId(effectiveCaId);
-+            cert.setCertPem(issued.certPem);
-+            cert.setSubjectDn(Gb35114CertUtil.subjectDn(issued.certificate));
-+            // 与源证书同一公钥 → 同一指纹，这是「设备无需重新配置」的依据
-+            cert.setKeyFingerprint(Gb35114CertUtil.publicKeyFingerprint(issued.certificate));
-+            cert.setKeyPem(Gb35114KeyProtector.encrypt(config.getKeyEncryptPassword(), keyPem));
-+            cert.setNotBefore(CERT_TIME.format(notBefore.toInstant()));
-+            cert.setNotAfter(CERT_TIME.format(notAfter.toInstant()));
-+            cert.setValidityDays(validityDays);
-+            cert.setKeyUsage(normalizeKeyUsage(profile));
-+            cert.setIsDefault(false);
-+            certMapper.add(cert);
-+            claimDefaultIfFirstServerIdentity(cert);
-+            log.info("[GB35114] 已复用密钥对签发服务端证书 #{}（源 #{}），公钥指纹={}",
-+                    cert.getId(), sourceCertId, cert.getKeyFingerprint());
++            // 原地更新源记录，不新增行。证书 ID 恒定 → 配置文件、wvp_device.server_cert_id、
++            // wvp_platform.device_cert_id 等按 ID 的引用永不悬空。
++            certMapper.updateServerIdentity(sourceCertId, issued.certPem,
++                    issued.certificate.getSerialNumber().toString(16),
++                    profile.getSubjectCn() == null || profile.getSubjectCn().trim().isEmpty()
++                            ? source.getSubjectCn() : profile.getSubjectCn(),
++                    Gb35114CertUtil.subjectDn(issued.certificate),
++                    effectiveCaId,
++                    CERT_TIME.format(notBefore.toInstant()), CERT_TIME.format(notAfter.toInstant()),
++                    validityDays, normalizeKeyUsage(profile),
++                    Gb35114CertUtil.publicKeyFingerprint(issued.certificate));
++            Gb35114Cert cert = certMapper.queryLite(sourceCertId);
++            log.info("[GB35114] 已复用密钥对原地换发服务端证书 #{}，公钥指纹={}",
++                    sourceCertId, cert == null ? null : cert.getKeyFingerprint());
 +            return reload(cert);
 +        } catch (Exception e) {
 +            log.error("[GB35114] 复用密钥对签发服务端证书失败", e);
@@ -4722,6 +4728,63 @@ index 0000000..167c026
 +            return java.util.Collections.emptyList();
 +        }
 +        return certMapper.queryServerIdentitiesByFingerprint(keyFingerprint);
++    }
++
++    @Override
++    public Gb35114Cert queryDeviceIdentity(String gbId) {
++        return resolveByPurpose(Gb35114Cert.PURPOSE_DEVICE_IDENTITY, gbId, "本地客户端证书");
++    }
++
++    @Override
++    public Gb35114Cert queryTrustedPlatformCert(String serverGbId) {
++        return resolveByPurpose(Gb35114Cert.PURPOSE_TRUSTED_PLATFORM, serverGbId, "上级服务端证书");
++    }
++
++    /**
++     * 按用途 + 国标 ID 解析证书：精确匹配优先，唯一候选兜底，多候选拒绝。
++     *
++     * <p>DEVICE_IDENTITY / TRUSTED_PLATFORM 这两个用途<b>天然不唯一</b> —— 本平台可以同时
++     * 接入多个上级，每个上级各有自己的一张。所以这里不能像 SERVER_IDENTITY 那样「取唯一的一条」，
++     * 而要按绑定的国标 ID 区分。
++     *
++     * <p>匹配不到国标 ID 时<b>只在候选唯一的情况下兜底</b>：多张候选说明运维配了多个上级但
++     * 没建立对应关系，此时无论挑哪张都是猜。猜错的代价是用别人的身份去注册（或拿别人的公钥
++     * 去验签），对方必然验不过，而本平台日志上一切正常 —— 所以宁可不签名、返回 null 并告警，
++     * 让调用方明确报「未配置证书」，也不要静默地挑一张。
++     *
++     * @param purpose 证书用途
++     * @param gbId    绑定的国标 ID，可为 null/空
++     * @param label   日志用中文名
++     */
++    private Gb35114Cert resolveByPurpose(String purpose, String gbId, String label) {
++        List<Gb35114Cert> all = certMapper.queryByPurpose(purpose);
++        if (all == null || all.isEmpty()) {
++            return null;
++        }
++        // 吊销的绝不参与（列表按 id 倒序，同一 gbId 有多张时取最新的那张）
++        List<Gb35114Cert> candidates = new java.util.ArrayList<>();
++        for (Gb35114Cert cert : all) {
++            if (!Boolean.TRUE.equals(cert.getRevoked())) {
++                candidates.add(cert);
++            }
++        }
++        if (candidates.isEmpty()) {
++            return null;
++        }
++        if (gbId != null && !gbId.isEmpty()) {
++            for (Gb35114Cert cert : candidates) {
++                if (gbId.equals(cert.getGbId())) {
++                    return cert;
++                }
++            }
++        }
++        if (candidates.size() == 1) {
++            return candidates.get(0);
++        }
++        log.warn("[GB35114] {} 有多张候选（{} 张）但无法按国标 ID {} 定位，拒绝猜测；"
++                        + "请在级联平台配置里显式绑定证书",
++                label, candidates.size(), gbId == null || gbId.isEmpty() ? "(空)" : gbId);
++        return null;
 +    }
 +
 +    /**
@@ -5371,7 +5434,6 @@ index 0000000..167c026
 +        cert.setOrganization(profile.getOrganization());
 +        cert.setOrganizationalUnit(profile.getOrganizationalUnit());
 +        cert.setRevoked(false);
-+        cert.setIsDefault(false);
 +        cert.setRemark(profile.getRemark());
 +        cert.setCreateTime(DateUtil.getNow());
 +        return cert;
@@ -5392,9 +5454,7 @@ index 0000000..167c026
 +        cert.setNotAfter(CERT_TIME.format(notAfter.toInstant()));
 +        cert.setValidityDays(validityDays);
 +        cert.setKeyUsage(normalizeKeyUsage(profile));
-+        cert.setIsDefault(false);
 +        certMapper.add(cert);
-+        claimDefaultIfFirstServerIdentity(cert);
 +        return reload(cert);
 +    }
 +
@@ -5427,33 +5487,11 @@ index 0000000..167c026
 +            cert.setValidityDays(profile.getValidityDays());
 +            // 导入的证书用途已固化在证书扩展里，此处仅记录用户填写值供展示
 +            cert.setKeyUsage(profile.getKeyUsage());
-+            cert.setIsDefault(false);
 +            certMapper.add(cert);
-+            claimDefaultIfFirstServerIdentity(cert);
 +            return reload(cert);
 +        } catch (Exception e) {
 +            log.error("[GB35114] 导入证书失败", e);
 +            throw new RuntimeException("导入证书失败: " + e.getMessage(), e);
-+        }
-+    }
-+
-+    /**
-+     * 新建的服务端证书若为该用途下的第一张，自动设为默认。
-+     *
-+     * <p>只在<b>一张都没有</b>时自动认领，绝不自动顶替已有的默认证书 ——
-+     * 否则「新增一张证书」又会静默改变签名身份，正是本次改造要消除的隐患。
-+     */
-+    private void claimDefaultIfFirstServerIdentity(Gb35114Cert cert) {
-+        if (!Gb35114Cert.PURPOSE_SERVER_IDENTITY.equals(cert.getPurpose()) || cert.getId() == null) {
-+            return;
-+        }
-+        List<Gb35114Cert> all = certMapper.queryByPurpose(Gb35114Cert.PURPOSE_SERVER_IDENTITY);
-+        boolean anyDefault = all != null && all.stream()
-+                .anyMatch(c -> Boolean.TRUE.equals(c.getIsDefault()));
-+        if (!anyDefault) {
-+            certMapper.markDefault(cert.getId());
-+            cert.setIsDefault(true);
-+            log.info("[GB35114] 服务端证书 #{} 为用途下首张，自动设为默认", cert.getId());
 +        }
 +    }
 +
@@ -5478,10 +5516,10 @@ index 0000000..167c026
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/conf/Gb35114Config.java b/src/main/java/com/genersoft/iot/vmp/gb35114/conf/Gb35114Config.java
 new file mode 100644
-index 0000000..ca69a3b
+index 0000000..4695b37
 --- /dev/null
 +++ b/src/main/java/com/genersoft/iot/vmp/gb35114/conf/Gb35114Config.java
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,75 @@
 +package com.genersoft.iot.vmp.gb35114.conf;
 +
 +import lombok.Data;
@@ -5501,16 +5539,9 @@ index 0000000..ca69a3b
 +    /** 国密总开关。 */
 +    private boolean enabled = false;
 +
-+    /** 本平台作为下级向上级注册时使用的设备证书 ID（关联 wvp_gb35114_cert）。 */
-+    private Integer deviceCertId;
-+
-+    /** 本平台作为平台（UAS）使用的服务器证书 ID（关联 wvp_gb35114_cert）。 */
-+    private Integer serverCertId;
-+
-+    /** 本平台受信的上级平台证书 ID（验 sign2）。 */
-+    private Integer platformCertId;
-+
-+    /** 私钥落地加密的对称密钥（至少 16 字节，AES）。 */
++    /**
++     * 私钥落地加密的对称密钥（至少 16 字节，AES）。
++     */
 +    private String keyEncryptPassword = "wvp-gb35114-default";
 +
 +    /** 证书默认有效期（天）。 */
@@ -7936,10 +7967,10 @@ index 0000000..3a1e9bd
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/sip/Gb35114SecurityService.java b/src/main/java/com/genersoft/iot/vmp/gb35114/sip/Gb35114SecurityService.java
 new file mode 100644
-index 0000000..d1629df
+index 0000000..fcc45dc
 --- /dev/null
 +++ b/src/main/java/com/genersoft/iot/vmp/gb35114/sip/Gb35114SecurityService.java
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,305 @@
 +package com.genersoft.iot.vmp.gb35114.sip;
 +
 +import com.genersoft.iot.vmp.gb35114.cert.bean.Gb35114Cert;
@@ -8003,9 +8034,12 @@ index 0000000..d1629df
 +     * <p>证书选择优先级：
 +     * <ol>
 +     *   <li>{@code certId} —— 调用方传入的<b>设备级绑定</b>（{@code wvp_device.server_cert_id}）；</li>
-+     *   <li>{@code gb35114.server-cert-id} —— 全局显式配置；</li>
-+     *   <li>证书表里 {@code is_default=1} 的那张（无标记时回退为最新一张可用证书）。</li>
++     *   <li>证书表中<b>唯一的</b>那张 {@code SERVER_IDENTITY}（由后端唯一性约束保证无歧义）。</li>
 +     * </ol>
++     *
++     * <p>用哪张证书<b>不再由配置文件指定</b>：{@code gb35114.server-cert-id} 这类写法把数据库主键
++     * 写死在 yml 里，证书一旦重建（ID 自增不回退）配置就指向不存在的行，且只在设备注册时才暴露。
++     * 现在证书的存在与唯一性都由数据库保证，配置只管开关与策略。
 +     *
 +     * <p>都取不到时退化为 Unidirection —— 此时无法签发 sign2，要求导入服务端 CA
 +     * 的摄像头会注册失败。
@@ -8043,7 +8077,7 @@ index 0000000..d1629df
 +        });
 +    }
 +
-+    /** 兼容旧调用：不指定设备级绑定时按全局配置/默认证书选择。 */
++    /** 兼容旧调用：不指定设备级绑定时按证书表中的服务端证书选择。 */
 +    public Gb35114PlatformStateMachine platformStateMachine(String nodeId, String sipId) {
 +        return platformStateMachine(nodeId, sipId, null);
 +    }
@@ -8051,7 +8085,7 @@ index 0000000..d1629df
 +    /**
 +     * 丢弃某个平台编码下的全部 UAS 状态机。
 +     *
-+     * <p>证书新增/删除/设为默认后调用：状态机持有签名身份与已协商的 VKEK，
++     * <p>证书新增/吊销/删除后调用：状态机持有签名身份与已协商的 VKEK，
 +     * 换证书后必须重建，否则会继续用旧私钥签 sign2。
 +     */
 +    public void invalidatePlatformStateMachines(String sipId) {
@@ -8065,15 +8099,28 @@ index 0000000..d1629df
 +    }
 +
 +    /**
++     * 丢弃全部证书相关的状态机缓存：UAS（平台侧）与 UAC（设备侧）都清。
++     *
++     * <p>证书集变动后<b>两侧都要清</b>：UAS 侧缓存签 sign2 的身份，UAC 侧缓存签 sign1 的
++     * 身份与已协商的 VKEK。而「同密钥再签」是<b>原地更新</b>（证书 ID 不变），
++     * 复合键 {@code serverId|deviceCertId|platformCertId} 因此不变，
++     * 只清 UAS 侧会让 UAC 侧继续用换发前的旧证书。
++     */
++    public void invalidateAllCertStateMachines() {
++        platformStateMachines.clear();
++        deviceStateMachines.clear();
++    }
++
++    /**
 +     * 解析本次注册应使用的服务器证书 ID。
 +     *
-+     * <p>优先级：设备级绑定 &gt; 全局显式配置 &gt; 证书表中的默认证书。
++     * <p>优先级：<b>设备级绑定 &gt; 证书表中唯一的那张 SERVER_IDENTITY</b>。
++     * 不再有「全局配置」这一层 —— 见 {@link #platformStateMachine} 的说明。
 +     *
-+     * <p><b>三条路径共用同一条规则：在「指定的那张证书所属的密钥组」内解析可用的证书。</b>
++     * <p><b>两条路径共用同一条规则：在「指定的那张证书所属的密钥组」内解析可用的证书。</b>
 +     * 因为签名身份的本质是<b>密钥对</b>而非证书 —— 设备只存公钥，同一密钥对签出的多张
 +     * 证书（有效期不同、签发者不同、序列号不同）对设备完全等价。所以指定的证书过期时，
 +     * 只要同组还有可用证书就继续用，设备无需重新配置；同组全过期才拒绝。
-+     * 这也让「生成多张有效期不同的服务端证书供不同客户端使用」成立：客户端拿到哪张不重要。
 +     *
 +     * <p>唯一不参与顺延的是<b>吊销</b> —— 见
 +     * {@link IGb35114CertService#resolveUsableServerIdentity(int)}。
@@ -8092,33 +8139,11 @@ index 0000000..d1629df
 +            }
 +            return resolved.getId();
 +        }
-+        if (config.getServerCertId() != null) {
-+            Gb35114Cert resolved = certService.resolveUsableServerIdentity(config.getServerCertId());
-+            if (resolved == null) {
-+                throw new Gb35114Exception("gb35114.server-cert-id 指向的服务器证书 #"
-+                        + config.getServerCertId()
-+                        + " 已不可用（已吊销 / 已过期），且同密钥组内无可用证书，拒绝注册");
-+            }
-+            return resolved.getId();
-+        }
-+        // 无显式指定：取「被标记为默认」的那张（它是运维对设备的承诺，设备导入的是它的公钥），
-+        // 在它的密钥组内解析可用证书；从未指定过默认时不存在承诺，从可用证书里挑一张即可。
-+        Gb35114Cert defaulted = certService.queryMarkedDefaultServerIdentity();
-+        if (defaulted == null) {
-+            Gb35114Cert active = certService.queryDefaultServerIdentity();
-+            return active == null ? null : active.getId();
-+        }
-+        Gb35114Cert resolved = certService.resolveUsableServerIdentity(defaulted.getId());
-+        if (resolved == null) {
-+            throw new Gb35114Exception("默认服务器证书 #" + defaulted.getId()
-+                    + " 已不可用（已吊销 / 已过期），且同密钥组内无可用证书，拒绝注册；"
-+                    + "请用「同密钥再签」换发后设为默认");
-+        }
-+        if (resolved.getId() != defaulted.getId()) {
-+            log.warn("[GB35114] 默认证书 #{} 不可用，改用同密钥对证书 #{}（指纹 {}）",
-+                    defaulted.getId(), resolved.getId(), resolved.getKeyFingerprint());
-+        }
-+        return resolved.getId();
++        // 未绑定：用证书表中唯一的那张服务端证书。SERVER_IDENTITY 由后端强制唯一
++        // （见 assertNoActiveServerIdentity），换发走「同密钥再签」原地更新，不新增行，
++        // 因此这里不存在「选哪张」的歧义，也无需 is_default 标记。
++        Gb35114Cert active = certService.queryDefaultServerIdentity();
++        return active == null ? null : active.getId();
 +    }
 +
 +    /**
@@ -8150,9 +8175,85 @@ index 0000000..d1629df
 +        deviceStateMachines.keySet().removeIf(k -> k.startsWith(serverId + "|"));
 +    }
 +
-+    /** 加载本平台作为下级注册用的设备身份（配置的 deviceCertId）。 */
++    /**
++     * 加载本平台作为下级注册用的设备身份（本地客户端证书，DEVICE_IDENTITY）。
++     *
++     * <p>该用途<b>不唯一</b>（可接入多个上级），按 {@code gbId} 解析；解析不到时返回
++     * {@code null}，由调用方给出「未配置证书」的明确报错 —— 详见
++     * {@link IGb35114CertService#queryDeviceIdentity(String)}。
++     */
 +    public Gb35114CertUtil.Gb35114Identity loadDeviceIdentity() {
-+        return loadDeviceIdentity(config.getDeviceCertId());
++        return loadDeviceIdentityByPlatform(null);
++    }
++
++    /**
++     * 按上级平台国标编码加载本平台的设备身份，{@code null} 表示未配置或有歧义。
++     *
++     * @param serverGbId 上级平台国标编码；为空时仅在候选唯一的情况下取用
++     */
++    public Gb35114CertUtil.Gb35114Identity loadDeviceIdentityByPlatform(String serverGbId) {
++        Gb35114Cert cert = certService.queryDeviceIdentity(serverGbId);
++        return cert == null ? null : certService.loadIdentity(cert.getId());
++    }
++
++    /**
++     * 加载上级平台证书（TRUSTED_PLATFORM，仅公钥，用于验 sign2）。
++     *
++     * <p>同样不唯一（多个上级各有各的），按上级国标编码解析；解析不到返回 {@code null}。
++     */
++    public X509Certificate loadPlatformCert() {
++        return loadPlatformCertByServer(null);
++    }
++
++    /**
++     * 按上级平台国标编码加载其签名证书，{@code null} 表示未导入或有歧义。
++     *
++     * @param serverGbId 上级平台国标编码；为空时仅在候选唯一的情况下取用
++     */
++    public X509Certificate loadPlatformCertByServer(String serverGbId) {
++        Gb35114Cert cert = certService.queryTrustedPlatformCert(serverGbId);
++        return cert == null ? null : certService.loadCert(cert.getId());
++    }
++
++    /**
++     * 获取（或创建）本平台作为下级的 UAC 状态机，按上级平台国标编码解析证书。
++     * 解析不到设备证书（无法签 sign1）时返回 {@code null}。
++     */
++    public Gb35114DeviceStateMachine uacStateMachine(String deviceId, String serverId) {
++        return uacStateMachine(deviceId, serverId, null, null);
++    }
++
++    /**
++     * 获取（或创建）本平台作为下级的 UAC 状态机。
++     *
++     * <p>证书优先取<b>上级平台（per-platform）配置</b>（{@code wvp_platform.device_cert_id} /
++     * {@code platform_cert_id}，调用方从 {@code parentPlatform} 传入），未配置时<b>从证书表按
++     * 上级国标编码解析</b>。这支撑「一个下级平台接入多个上级」：每个上级绑自己的那张证书，
++     * 互不干扰；没绑定时只要该用途只有一张也能跑起来。
++     *
++     * <p>不再回退 {@code gb35114.device-cert-id} 这类全局配置 —— 全局只能容纳一个上级，
++     * 接入第二个时要么改配置影响第一个，要么解析出错，且配置里写数据库主键在证书重建后悬空。
++     *
++     * @param deviceId       本平台向上注册的国标编码
++     * @param serverId       上级平台国标编码
++     * @param deviceCertId   本平台设备证书 ID（可为 null，回退按 serverId 解析）
++     * @param platformCertId 上级平台证书 ID（可为 null，回退按 serverId 解析）
++     */
++    public Gb35114DeviceStateMachine uacStateMachine(String deviceId, String serverId,
++                                                     Integer deviceCertId, Integer platformCertId) {
++        Integer effectiveDeviceCertId = deviceCertId != null
++                ? deviceCertId
++                : idOf(certService.queryDeviceIdentity(serverId));
++        Gb35114CertUtil.Gb35114Identity identity = loadDeviceIdentity(effectiveDeviceCertId);
++        if (identity == null) {
++            return null;
++        }
++        Integer effectivePlatformCertId = platformCertId != null
++                ? platformCertId
++                : idOf(certService.queryTrustedPlatformCert(serverId));
++        X509Certificate platformCert = loadPlatformCert(effectivePlatformCertId);
++        return deviceStateMachine(identity, platformCert, deviceId, serverId,
++                effectiveDeviceCertId, effectivePlatformCertId);
 +    }
 +
 +    /** 按证书 ID 加载设备身份，null 表示无。 */
@@ -8163,11 +8264,6 @@ index 0000000..d1629df
 +        return certService.loadIdentity(certId);
 +    }
 +
-+    /** 加载上级平台证书（配置的 platformCertId）。 */
-+    public X509Certificate loadPlatformCert() {
-+        return loadPlatformCert(config.getPlatformCertId());
-+    }
-+
 +    /** 按证书 ID 加载上级平台证书，null 表示无。 */
 +    public X509Certificate loadPlatformCert(Integer certId) {
 +        if (certId == null) {
@@ -8176,34 +8272,8 @@ index 0000000..d1629df
 +        return certService.loadCert(certId);
 +    }
 +
-+    /**
-+     * 获取（或创建）本平台作为下级的 UAC 状态机，用配置的设备证书身份与上级证书。
-+     * 未配置 deviceCertId（无法签名）时返回 {@code null}。
-+     */
-+    public Gb35114DeviceStateMachine uacStateMachine(String deviceId, String serverId) {
-+        return uacStateMachine(deviceId, serverId, null, null);
-+    }
-+
-+    /**
-+     * 获取（或创建）本平台作为下级的 UAC 状态机，证书优先取上级平台（per-platform）配置，
-+     * 未配置时回退全局 {@code gb35114:} 配置。
-+     *
-+     * @param deviceId         本平台向上注册的国标编码
-+     * @param serverId         上级平台国标编码
-+     * @param deviceCertId     本平台设备证书 ID（可为 null，回退全局）
-+     * @param platformCertId   上级平台证书 ID（可为 null，回退全局）
-+     */
-+    public Gb35114DeviceStateMachine uacStateMachine(String deviceId, String serverId,
-+                                                     Integer deviceCertId, Integer platformCertId) {
-+        Integer effectiveDeviceCertId = deviceCertId != null ? deviceCertId : config.getDeviceCertId();
-+        Integer effectivePlatformCertId = platformCertId != null ? platformCertId : config.getPlatformCertId();
-+        Gb35114CertUtil.Gb35114Identity identity = loadDeviceIdentity(effectiveDeviceCertId);
-+        if (identity == null) {
-+            return null;
-+        }
-+        X509Certificate platformCert = loadPlatformCert(effectivePlatformCertId);
-+        return deviceStateMachine(identity, platformCert, deviceId, serverId,
-+                effectiveDeviceCertId, effectivePlatformCertId);
++    private static Integer idOf(Gb35114Cert cert) {
++        return cert == null ? null : cert.getId();
 +    }
 +}
 diff --git a/src/main/java/com/genersoft/iot/vmp/gb35114/sip/Gb35114SipHeaders.java b/src/main/java/com/genersoft/iot/vmp/gb35114/sip/Gb35114SipHeaders.java
@@ -8587,10 +8657,10 @@ index 838b932..3467b10 100644
      }
  }
 diff --git a/src/main/resources/application-dev.yml b/src/main/resources/application-dev.yml
-index 10b379c..39f1a6e 100644
+index 10b379c..2cfaac7 100644
 --- a/src/main/resources/application-dev.yml
 +++ b/src/main/resources/application-dev.yml
-@@ -78,6 +78,23 @@ sip:
+@@ -78,6 +78,20 @@ sip:
    # 是否存储alarm信息
    alarm: false
  
@@ -8598,12 +8668,9 @@ index 10b379c..39f1a6e 100644
 +gb35114:
 +  # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
 +  enabled: false
-+  # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id），为空时 UAC 侧国密注册走 Digest
-+  # device-cert-id:
-+  # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
-+  # server-cert-id:
-+  # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
-+  # platform-cert-id:
++  # 用哪张证书不由本文件指定：证书全部存在 wvp_gb35114_cert 表里，运行时按用途从库中解析
++  # （服务端证书取唯一的一张；下级接入多个上级时按上级国标编码区分）。
++  # 在配置文件里写证书 ID，证书一旦重建（主键自增不回退）就会变成悬空引用，且只在注册时才暴露。
 +  # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
 +  key-encrypt-password: wvp-gb35114-default
 +  # [可选] 证书默认有效期（天）
@@ -8615,10 +8682,10 @@ index 10b379c..39f1a6e 100644
  media:
    id: zlmediakit-local
 diff --git a/src/main/resources/application-docker.yml b/src/main/resources/application-docker.yml
-index a37ebaa..669c4dd 100644
+index a37ebaa..ee6bdf5 100644
 --- a/src/main/resources/application-docker.yml
 +++ b/src/main/resources/application-docker.yml
-@@ -49,6 +49,24 @@ sip:
+@@ -49,6 +49,20 @@ sip:
      # [可选] 公共认证密码 移除密码将必须提前添加设备才能通过认证
      password: ${WVP_PWD:admin123}
  
@@ -8626,13 +8693,9 @@ index a37ebaa..669c4dd 100644
 +gb35114:
 +    # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
 +    enabled: ${WVP_GB35114_ENABLED:false}
-+    # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id），为空时 UAC 侧国密注册走 Digest
-+    # 证书ID为空时可注释掉下面三行，避免空字符串绑定 Integer 失败；启用时填入 wvp_gb35114_cert.id
-+    # device-cert-id: ${WVP_GB35114_DEVICE_CERT_ID}
-+    # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
-+    # server-cert-id: ${WVP_GB35114_SERVER_CERT_ID}
-+    # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
-+    # platform-cert-id: ${WVP_GB35114_PLATFORM_CERT_ID}
++    # 用哪张证书不由本文件指定：证书全部存在 wvp_gb35114_cert 表里，运行时按用途从库中解析
++    # （服务端证书取唯一的一张；下级接入多个上级时按上级国标编码区分）。
++    # 在配置文件里写证书 ID，证书一旦重建（主键自增不回退）就会变成悬空引用。
 +    # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
 +    key-encrypt-password: ${WVP_GB35114_KEY_PWD:wvp-gb35114-default}
 +    # [可选] 证书默认有效期（天）
@@ -8644,10 +8707,10 @@ index a37ebaa..669c4dd 100644
  media:
      # [必须修改] zlm服务器唯一id，用于触发hook时区别是哪台服务器,general.mediaServerId
 diff --git "a/src/main/resources/\351\205\215\347\275\256\350\257\246\346\203\205.yml" "b/src/main/resources/\351\205\215\347\275\256\350\257\246\346\203\205.yml"
-index 6723557..a956bfc 100644
+index 6723557..45493cf 100644
 --- "a/src/main/resources/\351\205\215\347\275\256\350\257\246\346\203\205.yml"
 +++ "b/src/main/resources/\351\205\215\347\275\256\350\257\246\346\203\205.yml"
-@@ -136,6 +136,24 @@ sip:
+@@ -136,6 +136,20 @@ sip:
      # 命令发送等待回复的超时时间, 单位:毫秒
      timeout: 1000
  
@@ -8655,13 +8718,9 @@ index 6723557..a956bfc 100644
 +gb35114:
 +  # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
 +  enabled: false
-+  # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id）
-+  # 为空时无法进行 UAC 侧国密注册（向上级注册仍走 Digest）
-+  # device-cert-id:
-+  # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
-+  # server-cert-id:
-+  # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
-+  # platform-cert-id:
++  # 用哪张证书不由本文件指定：证书全部存在 wvp_gb35114_cert 表里，运行时按用途从库中解析
++  # （服务端证书取唯一的一张；下级接入多个上级时按上级国标编码区分）。
++  # 在配置文件里写证书 ID，证书一旦重建（主键自增不回退）就会变成悬空引用，且只在注册时才暴露。
 +  # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
 +  key-encrypt-password: wvp-gb35114-default
 +  # [可选] 证书默认有效期（天）
@@ -9421,10 +9480,10 @@ index 0000000..3e054d5
 +}
 diff --git a/web/src/api/gb35114.js b/web/src/api/gb35114.js
 new file mode 100644
-index 0000000..9fa84ed
+index 0000000..2fc0e62
 --- /dev/null
 +++ b/web/src/api/gb35114.js
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,265 @@
 +import request from '@/utils/request'
 +
 +// ----------------------------------------------------------------------
@@ -9678,14 +9737,6 @@ index 0000000..9fa84ed
 +  })
 +}
 +
-+/** 设为默认服务器证书：未绑定设备的设备注册时用它签 sign2 */
-+export function setDefaultCert(id) {
-+  return request({
-+    method: 'post',
-+    url: `/api/gb35114/cert/default/${id}`
-+  })
-+}
-+
 +/**
 + * 复用现有密钥对再签一张服务端证书（公钥不变）。
 + * 同组证书可互换，设备导入任一张皆可接入，换证书无需重新配置设备。
@@ -9723,10 +9774,10 @@ index 1025758..66414ae 100644
      path: '/user',
      component: Layout,
 diff --git a/web/src/views/device/edit.vue b/web/src/views/device/edit.vue
-index 3b7f848..6287601 100755
+index 3b7f848..ff99e5f 100755
 --- a/web/src/views/device/edit.vue
 +++ b/web/src/views/device/edit.vue
-@@ -23,6 +23,32 @@
+@@ -23,6 +23,33 @@
            <el-form-item label="密码" prop="password">
              <el-input v-model="form.password" clearable />
            </el-form-item>
@@ -9742,24 +9793,25 @@ index 3b7f848..6287601 100755
 +          </el-form-item>
 +          <el-form-item v-if="isGb35114CertWay" label="服务端证书" prop="serverCertId">
 +            <el-select v-model="form.serverCertId" clearable style="float: left; width: 100%"
-+                       placeholder="不绑定，使用平台默认服务端证书">
++                       placeholder="不绑定，使用平台的服务端证书">
 +              <el-option
 +                v-for="item in serverCertList"
 +                :key="item.id"
-+                :label="`#${item.id} ${item.subjectCn || item.gbId || ''}${item.isDefault ? '（默认）' : ''}`"
++                :label="`#${item.id} ${item.subjectCn || item.gbId || ''}`"
 +                :value="item.id"
 +              />
 +            </el-select>
 +            <div class="hint" style="font-size:12px;color:#909399;line-height:1.6;margin-top:4px;">
 +              平台签 sign2 用的私钥必须与摄像头里导入的平台证书公钥配对，否则摄像头验签失败、
 +              注册后拒绝对信令服务（表现为目录查询 403、通道同步不上）。<br />
-+              摄像头只信任某一张特定证书时，在此绑定它；留空则跟随「证书管理-本地服务端证书」的默认证书。
++              摄像头只信任某一张特定证书时，在此绑定它；留空则使用「证书管理-本地服务端证书」
++              中的那张（该用途后端只允许存在一张，不存在选择歧义）。
 +            </div>
 +          </el-form-item>
            <el-form-item label="收流IP" prop="sdpIp">
              <el-input v-model="form.sdpIp" type="sdpIp" clearable />
            </el-form-item>
-@@ -70,6 +96,7 @@
+@@ -70,6 +97,7 @@
  
  <script>
  import elDragDialog from '@/directive/el-drag-dialog'
@@ -9767,7 +9819,7 @@ index 3b7f848..6287601 100755
  
  export default {
    name: 'DeviceEdit',
-@@ -82,6 +109,7 @@ export default {
+@@ -82,6 +110,7 @@ export default {
        isLoging: false,
        hostNames: [],
        mediaServerList: [], // 滅体节点列表
@@ -9775,7 +9827,7 @@ index 3b7f848..6287601 100755
        form: {},
        isEdit: false,
        rules: {
-@@ -89,7 +117,12 @@ export default {
+@@ -89,7 +118,12 @@ export default {
        }
      }
    },
@@ -9789,7 +9841,7 @@ index 3b7f848..6287601 100755
    created() {},
    methods: {
      openDialog: function(row, callback) {
-@@ -105,6 +138,21 @@ export default {
+@@ -105,6 +139,21 @@ export default {
          this.form = row
        }
        this.getMediaServerList()
@@ -9813,10 +9865,10 @@ index 3b7f848..6287601 100755
        this.$store.dispatch('server/getOnlineMediaServerList')
 diff --git a/web/src/views/gb35114/index.vue b/web/src/views/gb35114/index.vue
 new file mode 100644
-index 0000000..39bde81
+index 0000000..e89d937
 --- /dev/null
 +++ b/web/src/views/gb35114/index.vue
-@@ -0,0 +1,1487 @@
+@@ -0,0 +1,1476 @@
 +<template>
 +  <div class="app-container">
 +    <el-alert
@@ -9959,8 +10011,6 @@ index 0000000..39bde81
 +              <el-button v-if="scope.row.certPem" type="text" size="mini" @click="downloadFile('cert', scope.row)">证书</el-button>
 +              <el-button v-if="scope.row.certPem && scope.row.hasKey"
 +                         type="text" size="mini" style="color: #909399" @click="openReissue(scope.row)">同密钥再签</el-button>
-+              <el-button v-if="scope.row.certPem && !scope.row.revoked && !scope.row.isDefault"
-+                         type="text" size="mini" style="color: #409eff" @click="confirmSetDefault(scope.row)">设为默认</el-button>
 +              <el-button v-if="scope.row.certPem && !scope.row.revoked" type="text" size="mini" style="color: #e6a23c" @click="confirmRevoke(scope.row)">吊销</el-button>
 +              <el-button type="text" size="mini" style="color: #f56c6c" @click="confirmDeleteCert(scope.row)">删除</el-button>
 +            </template>
@@ -10611,7 +10661,7 @@ index 0000000..39bde81
 +  generateCa, importCa, listCa, deleteCa, downloadCa,
 +  createCsr, signPendingCsr, completePendingCsr, downloadCsr, selfSigned, importIdentity,
 +  issueFromCsr, reissueFromCsr, importPeer,
-+  listCert, getCertPolicy, downloadCert, revokeCert, deleteCert, setDefaultCert, reissueServerIdentity,
++  listCert, getCertPolicy, downloadCert, revokeCert, deleteCert, reissueServerIdentity,
 +  PURPOSE_SERVER_IDENTITY, PURPOSE_DEVICE_IDENTITY, PURPOSE_ISSUED_DEVICE, PURPOSE_TRUSTED_PLATFORM,
 +  PURPOSE_LOCAL_CA, PURPOSE_TRUSTED_CA, PURPOSE_LABELS
 +} from '@/api/gb35114'
@@ -11168,15 +11218,6 @@ index 0000000..39bde81
 +          deleteCert(row.id).then(() => { this.$message.success('删除成功'); this.loadCertList() })
 +        }).catch(() => {})
 +    },
-+    confirmSetDefault(row) {
-+      this.$confirm(
-+        `确认把「${row.subjectCn || row.gbId}」设为默认服务端证书？未绑定设备的设备将用它签 sign2。` +
-+        '若某台设备只信任另一张证书，请改为在该设备上绑定，不要改默认证书。',
-+        '提示', { type: 'warning' }
-+      ).then(() => {
-+        setDefaultCert(row.id).then(() => { this.$message.success('已设为默认'); this.loadCertList() })
-+      }).catch(() => {})
-+    },
 +    /** 复用源证书的密钥对再签一张（公钥不变，设备无需重新配置）。 */
 +    openReissue(row) {
 +      this.reissueDialog = {
@@ -11305,7 +11346,7 @@ index 0000000..39bde81
 +}
 +</style>
 diff --git a/web/src/views/platform/edit.vue b/web/src/views/platform/edit.vue
-index acfa027..25fe568 100644
+index acfa027..20058d4 100644
 --- a/web/src/views/platform/edit.vue
 +++ b/web/src/views/platform/edit.vue
 @@ -71,6 +71,50 @@
@@ -11328,7 +11369,7 @@ index acfa027..25fe568 100644
 +              <el-select
 +                v-model="value.deviceCertId"
 +                style="width: 100%"
-+                placeholder="本平台作下级注册用的设备证书（缺省用全局配置）"
++                placeholder="本平台作下级注册用的设备证书（接入多个上级时逐条绑定）"
 +                clearable
 +                filterable
 +              >
@@ -11344,7 +11385,7 @@ index acfa027..25fe568 100644
 +              <el-select
 +                v-model="value.platformCertId"
 +                style="width: 100%"
-+                placeholder="受信上级平台证书（验sign2，缺省用全局配置）"
++                placeholder="受信上级平台证书（验sign2，接入多个上级时逐条绑定）"
 +                clearable
 +                filterable
 +              >
@@ -11450,10 +11491,10 @@ index 0c32a32..3f0fa0f 100755
            }
 diff --git "a/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-mysql.sql" "b/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-mysql.sql"
 new file mode 100644
-index 0000000..25bba09
+index 0000000..1c28baa
 --- /dev/null
 +++ "b/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-mysql.sql"
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,363 @@
 +-- GB35114 A 级国密证书管理表结构变更（MySQL）
 +-- 在 wvp-GB28181-pro 2.7.4 基础上新增
 +
@@ -11697,12 +11738,14 @@ index 0000000..25bba09
 +  FROM wvp_platform p WHERE p.enable = 1;
 +
 +-- ============================================================================
-+-- 多服务器证书支持：平台可以并存多张 SERVER_IDENTITY 证书，显式指定默认者，
-+-- 并允许按设备绑定它实际信任的那一张。
++-- 按设备绑定它实际信任的那张服务器证书。
 +--
 +-- 背景：UAS 签 sign2 时只能用一个私钥，而设备侧只信任它配置时导入的那张平台
 +-- 证书的公钥。此前「按 id 倒序取最新」的隐式选择意味着新增一张服务器证书就会
 +-- 静默顶掉旧证书，让所有按旧证书配置过的设备注册后立刻被 403 拒绝。
++-- 现在 SERVER_IDENTITY 由后端强制唯一（换发走「同密钥再签」原地更新），
++-- 未绑定设备的设备直接使用平台唯一的那张；此列只用于「设备信任的并非平台
++-- 当前签名身份」的例外情况。
 +-- ============================================================================
 +DROP PROCEDURE IF EXISTS `wvp_gb35114_multi_server_cert`;
 +DELIMITER //
@@ -11710,42 +11753,47 @@ index 0000000..25bba09
 +BEGIN
 +    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
 +                   WHERE TABLE_SCHEMA = (SELECT DATABASE())
-+                     AND table_name = 'wvp_gb35114_cert' AND column_name = 'is_default')
-+    THEN
-+        ALTER TABLE wvp_gb35114_cert ADD is_default tinyint(1) DEFAULT 0
-+            COMMENT '是否默认服务器证书（仅对 purpose=SERVER_IDENTITY 有意义，全局至多一张为1）';
-+    END IF;
-+
-+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
-+                   WHERE TABLE_SCHEMA = (SELECT DATABASE())
 +                     AND table_name = 'wvp_device' AND column_name = 'server_cert_id')
 +    THEN
 +        ALTER TABLE wvp_device ADD server_cert_id integer
-+            COMMENT '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用默认证书）';
++            COMMENT '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用平台唯一的那张服务端证书）';
 +    END IF;
 +END; //
 +DELIMITER ;
 +call wvp_gb35114_multi_server_cert();
 +DROP PROCEDURE wvp_gb35114_multi_server_cert;
 +
-+-- 默认证书初始化：沿用改造前「取最新一张有效 SERVER_IDENTITY」的行为，
-+-- 保证升级瞬间的签名身份与升级前完全一致。现场若设备信任的是更早的一张，
-+-- 请在「本地服务端证书」页把那张设为默认（或按设备绑定）。
-+UPDATE wvp_gb35114_cert SET is_default = 0 WHERE purpose = 'SERVER_IDENTITY';
++-- ============================================================================
++-- 移除 is_default 列（如存在）。
++--
++-- 该列曾用于在「同一密钥对签出的多张服务端证书」之间挑锚点。现已改为：后端强制
++-- SERVER_IDENTITY 至多一条未吊销记录，换发走「同密钥再签」原地更新（不新增行，
++-- 证书 ID 恒定，配置文件与设备绑定按 ID 的引用永不悬空），于是「选哪张」这个问题
++-- 本身消失了，标记默认既无必要也无意义。
++--
++-- 存量的多行 SERVER_IDENTITY 不会被本脚本删除：本平台只保留一组密钥，但同组可以
++-- 有多张证书（换有效期/DN/签发者），它们公钥指纹相同、彼此可互换，都在用。
++-- 新代码取「id 最大的一张未吊销记录」作为签名身份。
++-- ============================================================================
++DROP PROCEDURE IF EXISTS `wvp_gb35114_drop_is_default`;
++DELIMITER //
++CREATE PROCEDURE `wvp_gb35114_drop_is_default`()
++BEGIN
++    IF EXISTS (SELECT column_name FROM information_schema.columns
++               WHERE TABLE_SCHEMA = (SELECT DATABASE())
++                 AND table_name = 'wvp_gb35114_cert' AND column_name = 'is_default')
++    THEN
++        ALTER TABLE wvp_gb35114_cert DROP COLUMN is_default;
++    END IF;
++END; //
++DELIMITER ;
++call wvp_gb35114_drop_is_default();
++DROP PROCEDURE wvp_gb35114_drop_is_default;
 +
-+UPDATE wvp_gb35114_cert SET is_default = 1
-+ WHERE purpose = 'SERVER_IDENTITY'
-+   AND id = (SELECT id FROM (
-+         SELECT MAX(id) AS id FROM wvp_gb35114_cert
-+          WHERE purpose = 'SERVER_IDENTITY'
-+            AND (revoked IS NULL OR revoked = 0)
-+            AND cert_pem IS NOT NULL AND cert_pem != ''
-+       ) t);
-+
-+-- 核对：当前默认服务器证书
-+SELECT id, gb_id, subject_cn, serial_number, not_after,
++-- 核对：当前服务端证书（按 id 倒序，第一条未吊销的即为签名身份）
++SELECT id, gb_id, subject_cn, serial_number, not_after, key_fingerprint,
 +       CASE WHEN key_pem IS NULL OR key_pem = '' THEN 0 ELSE 1 END AS has_key
-+  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY is_default DESC, id DESC;
++  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY id DESC;
 +
 +-- ============================================================================
 +-- 公钥指纹：标识「同一个 SM2 签名身份」。
@@ -11812,7 +11860,7 @@ index 0000000..25bba09
 +  FROM wvp_gb35114_ca ORDER BY purpose, id;
 diff --git "a/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-postgresql-kingbase.sql" "b/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-postgresql-kingbase.sql"
 new file mode 100644
-index 0000000..5542c67
+index 0000000..95f4df8
 --- /dev/null
 +++ "b/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-postgresql-kingbase.sql"
 @@ -0,0 +1,196 @@
@@ -11948,37 +11996,37 @@ index 0000000..5542c67
 +UPDATE wvp_gb35114_cert SET key_usage = 'digitalSignature' WHERE key_usage IS NULL;
 +
 +-- ============================================================================
-+-- 多服务器证书支持：平台可以并存多张 SERVER_IDENTITY 证书，显式指定默认者，
-+-- 并允许按设备绑定它实际信任的那一张。
++-- 按设备绑定它实际信任的那张服务器证书。
 +--
 +-- 背景：UAS 签 sign2 时只能用一个私钥，而设备侧只信任它配置时导入的那张平台
 +-- 证书的公钥。此前「按 id 倒序取最新」的隐式选择意味着新增一张服务器证书就会
 +-- 静默顶掉旧证书，让所有按旧证书配置过的设备注册后立刻被 403 拒绝。
++-- 现在 SERVER_IDENTITY 由后端强制唯一（换发走「同密钥再签」原地更新），
++-- 未绑定设备的设备直接使用平台唯一的那张；此列只用于「设备信任的并非平台
++-- 当前签名身份」的例外情况。
 +-- ============================================================================
-+ALTER TABLE wvp_gb35114_cert ADD COLUMN IF NOT EXISTS is_default smallint DEFAULT 0;
-+COMMENT ON COLUMN wvp_gb35114_cert.is_default IS
-+    '是否默认服务器证书（仅对 purpose=SERVER_IDENTITY 有意义，全局至多一张为1）';
-+
 +ALTER TABLE wvp_device ADD COLUMN IF NOT EXISTS server_cert_id integer;
 +COMMENT ON COLUMN wvp_device.server_cert_id IS
-+    '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用默认证书）';
++    '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用平台唯一的那张服务端证书）';
 +
-+-- 默认证书初始化：沿用改造前「取最新一张有效 SERVER_IDENTITY」的行为，
-+-- 保证升级瞬间的签名身份与升级前完全一致。现场若设备信任的是更早的一张，
-+-- 请在「本地服务端证书」页把那张设为默认（或按设备绑定）。
-+UPDATE wvp_gb35114_cert SET is_default = 0 WHERE purpose = 'SERVER_IDENTITY';
++-- ============================================================================
++-- 移除 is_default 列（如存在）。
++--
++-- 该列曾用于在「同一密钥对签出的多张服务端证书」之间挑锚点。现已改为：后端强制
++-- SERVER_IDENTITY 至多一条未吊销记录，换发走「同密钥再签」原地更新（不新增行，
++-- 证书 ID 恒定，配置文件与设备绑定按 ID 的引用永不悬空），于是「选哪张」这个问题
++-- 本身消失了，标记默认既无必要也无意义。
++--
++-- 存量的多行 SERVER_IDENTITY 不会被本脚本删除：本平台只保留一组密钥，但同组可以
++-- 有多张证书（换有效期/DN/签发者），它们公钥指纹相同、彼此可互换，都在用。
++-- 新代码取「id 最大的一张未吊销记录」作为签名身份。
++-- ============================================================================
++ALTER TABLE wvp_gb35114_cert DROP COLUMN IF EXISTS is_default;
 +
-+UPDATE wvp_gb35114_cert SET is_default = 1
-+ WHERE purpose = 'SERVER_IDENTITY'
-+   AND id = (SELECT MAX(id) FROM wvp_gb35114_cert
-+              WHERE purpose = 'SERVER_IDENTITY'
-+                AND (revoked IS NULL OR revoked = false)
-+                AND cert_pem IS NOT NULL AND cert_pem != '');
-+
-+-- 核对：当前默认服务器证书
-+SELECT id, gb_id, subject_cn, serial_number, not_after,
++-- 核对：当前服务端证书（按 id 倒序，第一条未吊销的即为签名身份）
++SELECT id, gb_id, subject_cn, serial_number, not_after, key_fingerprint,
 +       CASE WHEN key_pem IS NULL OR key_pem = '' THEN 0 ELSE 1 END AS has_key
-+  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY is_default DESC, id DESC;
++  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY id DESC;
 +
 +-- ============================================================================
 +-- 公钥指纹：标识「同一个 SM2 签名身份」。
@@ -12014,7 +12062,7 @@ index 0000000..5542c67
 +  FROM wvp_gb35114_ca ORDER BY purpose, id;
 diff --git "a/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-\350\276\276\346\242\246.sql" "b/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-\350\276\276\346\242\246.sql"
 new file mode 100644
-index 0000000..3575b54
+index 0000000..32afa84
 --- /dev/null
 +++ "b/\346\225\260\346\215\256\345\272\223/2.7.4/\346\233\264\346\226\260-gb35114-\350\276\276\346\242\246.sql"
 @@ -0,0 +1,422 @@
@@ -12339,27 +12387,16 @@ index 0000000..3575b54
 +
 +
 +/*============================================================================
-+ * 多服务器证书支持：平台可以并存多张 SERVER_IDENTITY 证书，显式指定默认者，
-+ * 并允许按设备绑定它实际信任的那一张。
++ * 按设备绑定它实际信任的那张服务器证书。
 + *
 + * 背景：UAS 签 sign2 时只能用一个私钥，而设备侧只信任它配置时导入的那张平台
 + * 证书的公钥。此前「按 id 倒序取最新」的隐式选择意味着新增一张服务器证书就会
 + * 静默顶掉旧证书，让所有按旧证书配置过的设备注册后立刻被 403 拒绝。
++ * 现在 SERVER_IDENTITY 由后端强制唯一（换发走「同密钥再签」原地更新），
++ * 未绑定设备的设备直接使用平台唯一的那张；此列只用于「设备信任的并非平台
++ * 当前签名身份」的例外情况。
 + * 达梦原生不支持 ADD COLUMN IF NOT EXISTS，用匿名块判列后添加。
 + *============================================================================*/
-+DECLARE
-+V_CNT INT;
-+BEGIN
-+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS
-+ WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'IS_DEFAULT';
-+IF V_CNT = 0 THEN
-+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert ADD is_default bit DEFAULT 0';
-+END IF;
-+END;
-+/
-+COMMENT ON COLUMN wvp_gb35114_cert.is_default IS
-+    '是否默认服务器证书（仅对 purpose=SERVER_IDENTITY 有意义，全局至多一张为1）';
-+
 +DECLARE
 +V_CNT INT;
 +BEGIN
@@ -12371,24 +12408,35 @@ index 0000000..3575b54
 +END;
 +/
 +COMMENT ON COLUMN wvp_device.server_cert_id IS
-+    '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用默认证书）';
++    '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用平台唯一的那张服务端证书）';
 +
-+-- 默认证书初始化：沿用改造前「取最新一张有效 SERVER_IDENTITY」的行为，
-+-- 保证升级瞬间的签名身份与升级前完全一致。现场若设备信任的是更早的一张，
-+-- 请在「本地服务端证书」页把那张设为默认（或按设备绑定）。
-+UPDATE wvp_gb35114_cert SET is_default = 0 WHERE purpose = 'SERVER_IDENTITY';
++/*============================================================================
++ * 移除 is_default 列（如存在）。
++ *
++ * 该列曾用于在「同一密钥对签出的多张服务端证书」之间挑锚点。现已改为：后端强制
++ * SERVER_IDENTITY 至多一条未吊销记录，换发走「同密钥再签」原地更新（不新增行，
++ * 证书 ID 恒定，配置文件与设备绑定按 ID 的引用永不悬空），于是「选哪张」这个问题
++ * 本身消失了，标记默认既无必要也无意义。
++ *
++ * 存量的多行 SERVER_IDENTITY 不会被本脚本删除：本平台只保留一组密钥，但同组可以
++ * 有多张证书（换有效期/DN/签发者），它们公钥指纹相同、彼此可互换，都在用。
++ * 新代码取「id 最大的一张未吊销记录」作为签名身份。
++ *============================================================================*/
++DECLARE
++V_CNT INT;
++BEGIN
++SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS
++ WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'IS_DEFAULT';
++IF V_CNT > 0 THEN
++        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert DROP COLUMN is_default';
++END IF;
++END;
++/
 +
-+UPDATE wvp_gb35114_cert SET is_default = 1
-+ WHERE purpose = 'SERVER_IDENTITY'
-+   AND id = (SELECT MAX(id) FROM wvp_gb35114_cert
-+              WHERE purpose = 'SERVER_IDENTITY'
-+                AND (revoked IS NULL OR revoked = 0)
-+                AND cert_pem IS NOT NULL AND LENGTH(cert_pem) > 0);
-+
-+-- 核对：当前默认服务器证书
-+SELECT id, gb_id, subject_cn, serial_number, not_after,
++-- 核对：当前服务端证书（按 id 倒序，第一条未吊销的即为签名身份）
++SELECT id, gb_id, subject_cn, serial_number, not_after, key_fingerprint,
 +       CASE WHEN key_pem IS NULL OR LENGTH(key_pem) = 0 THEN 0 ELSE 1 END AS has_key
-+  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY is_default DESC, id DESC;
++  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY id DESC;
 +
 +/*============================================================================
 + * 公钥指纹：标识「同一个 SM2 签名身份」。

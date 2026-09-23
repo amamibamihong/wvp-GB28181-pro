@@ -261,7 +261,6 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
             cert.setKeyPem(Gb35114KeyProtector.encrypt(config.getKeyEncryptPassword(), csr.keyPem));
             cert.setCertPem(null);
             cert.setValidityDays(validityDays);
-            cert.setIsDefault(false);
             certMapper.add(cert);
             return cert;
         } catch (Exception e) {
@@ -308,7 +307,6 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
                     caId, validityDays, normalizeKeyUsage(cert),
                     fingerprintOf(issued.certificate));
             Gb35114Cert signed = certMapper.queryLite(certId);
-            claimDefaultIfFirstServerIdentity(signed);
             return signed;
         } catch (Exception e) {
             log.error("[GB35114] 签发待签发证书失败", e);
@@ -343,7 +341,6 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
                     resolveIssuerCaId(x509), cert.getValidityDays(), normalizeKeyUsage(cert),
                     fingerprintOf(x509));
             Gb35114Cert completed = certMapper.queryLite(certId);
-            claimDefaultIfFirstServerIdentity(completed);
             return completed;
         } catch (Exception e) {
             log.error("[GB35114] 回填证书失败", e);
@@ -499,8 +496,7 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
      * 落库后重新读一遍列表列再返回。
      *
      * <p>新增/签发接口返回的是内存里刚拼好的对象，缺少只有 SQL 才产生的派生列
-     * （{@code has_key} 是 {@code CASE WHEN} 算出来的、{@code is_default} 可能被
-     * {@link #claimDefaultIfFirstServerIdentity} 改过），直接返回会让前端看到
+     * （{@code has_key} 是 {@code CASE WHEN} 算出来的），直接返回会让前端看到
      * {@code hasKey=null}，与列表接口的自相矛盾。
      */
     private Gb35114Cert reload(Gb35114Cert cert) {
@@ -574,36 +570,28 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
      * 之间挑用，等于悄悄换掉设备信任的公钥，设备验 sign2 必然失败，而平台日志上一切正常
      * —— 故障点会漂到设备侧，极难定位。所以这里<b>绝不跨密钥组回退</b>。
      *
-     * <p>「多个证书」只允许是<b>同一密钥组内的多张</b>（有效期/签发者/序列号不同），
-     * 它们对设备完全等价。因此本方法先在组内选出「锚点」，再用
-     * {@link #resolveUsableServerIdentity(int)} 在锚点所在组内找一张真正可用的。
+     * <p><b>不存在「选哪一张」的问题</b>：{@code SERVER_IDENTITY} 由后端强制唯一
+     * （见 {@link #assertNoActiveServerIdentity}），换发走「同密钥再签」原地更新，
+     * 所以该用途下至多一条未吊销记录，取它即可。早期版本用 {@code is_default} 列
+     * 在「同密钥对的多张证书」之间挑锚点，现已随唯一性约束一并删除。
      *
-     * <p>锚点优先取<b>被显式标记为默认</b>的那张：它是运维对设备的承诺。从未标记过默认时
-     * （例如存量数据）取最新的一张，此时不存在承诺，挑到哪张都不算背信。
-     *
-     * @return 可用的服务端证书；锚点已吊销、或其所在组内已无可用证书时返回 {@code null}
+     * @return 可用的服务端证书；已吊销、或（严格策略下）已过期时返回 {@code null}
      */
     @Override
     public Gb35114Cert queryDefaultServerIdentity() {
-        Gb35114Cert anchor = queryMarkedDefaultServerIdentity();
-        if (anchor == null) {
-            List<Gb35114Cert> list = certMapper.queryServerIdentities();
-            if (list == null || list.isEmpty()) {
-                return null;
-            }
-            anchor = list.get(0); // 列表按 is_default DESC, id DESC，无标记时即最新一张
+        List<Gb35114Cert> list = certMapper.queryServerIdentities();
+        if (list == null || list.isEmpty()) {
+            return null;
         }
-        // 组内解析：锚点自身可用就返回它；不可用则找同公钥指纹的兄弟证书。
-        // 注意锚点若已吊销，resolveUsableServerIdentity 直接返回 null 而不顺延 —— 吊销即停用。
-        return resolveUsableServerIdentity(anchor.getId());
-    }
-
-    @Override
-    public Gb35114Cert queryMarkedDefaultServerIdentity() {
-        for (Gb35114Cert cert : certMapper.queryServerIdentities()) {
-            if (Boolean.TRUE.equals(cert.getIsDefault())) {
-                return cert;
+        // 按 id 倒序，取第一条未吊销的。唯一性约束下这里通常只有一条；
+        // 存量数据可能有多条（唯一性守卫是后加的），取最新的一条兼容之。
+        for (Gb35114Cert cert : list) {
+            if (Boolean.TRUE.equals(cert.getRevoked())) {
+                continue;
             }
+            // 组内解析：证书不可用时按公钥指纹找同密钥对的兄弟证书。
+            // 注意已吊销的证书 resolveUsableServerIdentity 直接返回 null 而不顺延 —— 吊销即停用。
+            return resolveUsableServerIdentity(cert.getId());
         }
         return null;
     }
@@ -653,25 +641,6 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
     }
 
     @Override
-    public void setDefaultServerIdentity(int certId) {
-        Gb35114Cert cert = certMapper.queryLite(certId);
-        if (cert == null) {
-            throw new IllegalArgumentException("证书 #" + certId + " 不存在");
-        }
-        if (!Gb35114Cert.PURPOSE_SERVER_IDENTITY.equals(cert.getPurpose())) {
-            throw new IllegalArgumentException("证书 #" + certId + " 用途为 " + cert.getPurpose()
-                    + "，只有本地服务端证书可以设为默认");
-        }
-        if (!isUsableServerIdentity(cert, DateUtil.getNow())) {
-            throw new IllegalArgumentException("证书 #" + certId
-                    + " 不可用（需持有私钥、未吊销、未过期），不能设为默认");
-        }
-        // 先清后置，保证全局至多一张默认
-        certMapper.clearDefault();
-        certMapper.markDefault(certId);
-    }
-
-    @Override
     public Gb35114Cert reissueServerIdentity(int sourceCertId, Gb35114Cert profile,
                                              Integer caId, int validityDays) {
         try {
@@ -716,25 +685,20 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
                         publicKey, notBefore, notAfter, keyUsageBits(profile));
             }
 
-            Gb35114Cert cert = baseRecord(profile);
-            cert.setPurpose(Gb35114Cert.PURPOSE_SERVER_IDENTITY);
-            cert.setType(Gb35114Cert.TYPE_SERVER);
-            cert.setSerialNumber(issued.certificate.getSerialNumber().toString(16));
-            cert.setCaId(effectiveCaId);
-            cert.setCertPem(issued.certPem);
-            cert.setSubjectDn(Gb35114CertUtil.subjectDn(issued.certificate));
-            // 与源证书同一公钥 → 同一指纹，这是「设备无需重新配置」的依据
-            cert.setKeyFingerprint(Gb35114CertUtil.publicKeyFingerprint(issued.certificate));
-            cert.setKeyPem(Gb35114KeyProtector.encrypt(config.getKeyEncryptPassword(), keyPem));
-            cert.setNotBefore(CERT_TIME.format(notBefore.toInstant()));
-            cert.setNotAfter(CERT_TIME.format(notAfter.toInstant()));
-            cert.setValidityDays(validityDays);
-            cert.setKeyUsage(normalizeKeyUsage(profile));
-            cert.setIsDefault(false);
-            certMapper.add(cert);
-            claimDefaultIfFirstServerIdentity(cert);
-            log.info("[GB35114] 已复用密钥对签发服务端证书 #{}（源 #{}），公钥指纹={}",
-                    cert.getId(), sourceCertId, cert.getKeyFingerprint());
+            // 原地更新源记录，不新增行。证书 ID 恒定 → 配置文件、wvp_device.server_cert_id、
+            // wvp_platform.device_cert_id 等按 ID 的引用永不悬空。
+            certMapper.updateServerIdentity(sourceCertId, issued.certPem,
+                    issued.certificate.getSerialNumber().toString(16),
+                    profile.getSubjectCn() == null || profile.getSubjectCn().trim().isEmpty()
+                            ? source.getSubjectCn() : profile.getSubjectCn(),
+                    Gb35114CertUtil.subjectDn(issued.certificate),
+                    effectiveCaId,
+                    CERT_TIME.format(notBefore.toInstant()), CERT_TIME.format(notAfter.toInstant()),
+                    validityDays, normalizeKeyUsage(profile),
+                    Gb35114CertUtil.publicKeyFingerprint(issued.certificate));
+            Gb35114Cert cert = certMapper.queryLite(sourceCertId);
+            log.info("[GB35114] 已复用密钥对原地换发服务端证书 #{}，公钥指纹={}",
+                    sourceCertId, cert == null ? null : cert.getKeyFingerprint());
             return reload(cert);
         } catch (Exception e) {
             log.error("[GB35114] 复用密钥对签发服务端证书失败", e);
@@ -748,6 +712,63 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
             return java.util.Collections.emptyList();
         }
         return certMapper.queryServerIdentitiesByFingerprint(keyFingerprint);
+    }
+
+    @Override
+    public Gb35114Cert queryDeviceIdentity(String gbId) {
+        return resolveByPurpose(Gb35114Cert.PURPOSE_DEVICE_IDENTITY, gbId, "本地客户端证书");
+    }
+
+    @Override
+    public Gb35114Cert queryTrustedPlatformCert(String serverGbId) {
+        return resolveByPurpose(Gb35114Cert.PURPOSE_TRUSTED_PLATFORM, serverGbId, "上级服务端证书");
+    }
+
+    /**
+     * 按用途 + 国标 ID 解析证书：精确匹配优先，唯一候选兜底，多候选拒绝。
+     *
+     * <p>DEVICE_IDENTITY / TRUSTED_PLATFORM 这两个用途<b>天然不唯一</b> —— 本平台可以同时
+     * 接入多个上级，每个上级各有自己的一张。所以这里不能像 SERVER_IDENTITY 那样「取唯一的一条」，
+     * 而要按绑定的国标 ID 区分。
+     *
+     * <p>匹配不到国标 ID 时<b>只在候选唯一的情况下兜底</b>：多张候选说明运维配了多个上级但
+     * 没建立对应关系，此时无论挑哪张都是猜。猜错的代价是用别人的身份去注册（或拿别人的公钥
+     * 去验签），对方必然验不过，而本平台日志上一切正常 —— 所以宁可不签名、返回 null 并告警，
+     * 让调用方明确报「未配置证书」，也不要静默地挑一张。
+     *
+     * @param purpose 证书用途
+     * @param gbId    绑定的国标 ID，可为 null/空
+     * @param label   日志用中文名
+     */
+    private Gb35114Cert resolveByPurpose(String purpose, String gbId, String label) {
+        List<Gb35114Cert> all = certMapper.queryByPurpose(purpose);
+        if (all == null || all.isEmpty()) {
+            return null;
+        }
+        // 吊销的绝不参与（列表按 id 倒序，同一 gbId 有多张时取最新的那张）
+        List<Gb35114Cert> candidates = new java.util.ArrayList<>();
+        for (Gb35114Cert cert : all) {
+            if (!Boolean.TRUE.equals(cert.getRevoked())) {
+                candidates.add(cert);
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        if (gbId != null && !gbId.isEmpty()) {
+            for (Gb35114Cert cert : candidates) {
+                if (gbId.equals(cert.getGbId())) {
+                    return cert;
+                }
+            }
+        }
+        if (candidates.size() == 1) {
+            return candidates.get(0);
+        }
+        log.warn("[GB35114] {} 有多张候选（{} 张）但无法按国标 ID {} 定位，拒绝猜测；"
+                        + "请在级联平台配置里显式绑定证书",
+                label, candidates.size(), gbId == null || gbId.isEmpty() ? "(空)" : gbId);
+        return null;
     }
 
     /**
@@ -1397,7 +1418,6 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
         cert.setOrganization(profile.getOrganization());
         cert.setOrganizationalUnit(profile.getOrganizationalUnit());
         cert.setRevoked(false);
-        cert.setIsDefault(false);
         cert.setRemark(profile.getRemark());
         cert.setCreateTime(DateUtil.getNow());
         return cert;
@@ -1418,9 +1438,7 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
         cert.setNotAfter(CERT_TIME.format(notAfter.toInstant()));
         cert.setValidityDays(validityDays);
         cert.setKeyUsage(normalizeKeyUsage(profile));
-        cert.setIsDefault(false);
         certMapper.add(cert);
-        claimDefaultIfFirstServerIdentity(cert);
         return reload(cert);
     }
 
@@ -1453,33 +1471,11 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
             cert.setValidityDays(profile.getValidityDays());
             // 导入的证书用途已固化在证书扩展里，此处仅记录用户填写值供展示
             cert.setKeyUsage(profile.getKeyUsage());
-            cert.setIsDefault(false);
             certMapper.add(cert);
-            claimDefaultIfFirstServerIdentity(cert);
             return reload(cert);
         } catch (Exception e) {
             log.error("[GB35114] 导入证书失败", e);
             throw new RuntimeException("导入证书失败: " + e.getMessage(), e);
-        }
-    }
-
-    /**
-     * 新建的服务端证书若为该用途下的第一张，自动设为默认。
-     *
-     * <p>只在<b>一张都没有</b>时自动认领，绝不自动顶替已有的默认证书 ——
-     * 否则「新增一张证书」又会静默改变签名身份，正是本次改造要消除的隐患。
-     */
-    private void claimDefaultIfFirstServerIdentity(Gb35114Cert cert) {
-        if (!Gb35114Cert.PURPOSE_SERVER_IDENTITY.equals(cert.getPurpose()) || cert.getId() == null) {
-            return;
-        }
-        List<Gb35114Cert> all = certMapper.queryByPurpose(Gb35114Cert.PURPOSE_SERVER_IDENTITY);
-        boolean anyDefault = all != null && all.stream()
-                .anyMatch(c -> Boolean.TRUE.equals(c.getIsDefault()));
-        if (!anyDefault) {
-            certMapper.markDefault(cert.getId());
-            cert.setIsDefault(true);
-            log.info("[GB35114] 服务端证书 #{} 为用途下首张，自动设为默认", cert.getId());
         }
     }
 
