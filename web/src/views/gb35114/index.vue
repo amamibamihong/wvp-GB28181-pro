@@ -266,7 +266,7 @@
                 </el-button>
               </el-tooltip>
               <el-tooltip v-else
-                          content="没有级联平台显式绑定本证书。平台注册时会回退到全局 gb35114.device-cert-id 配置"
+                          content="没有级联平台显式绑定本证书。本用途只有这一张时按上级国标编码匹配兜底；有多张则拒绝猜测，需在级联编辑页逐条绑定"
                           placement="top">
                 <span style="color: #c0c4cc">未绑定</span>
               </el-tooltip>
@@ -358,7 +358,7 @@
                 </el-button>
               </el-tooltip>
               <el-tooltip v-else
-                          content="没有级联平台显式绑定本证书。验签时会回退到全局 gb35114.platform-cert-id 配置"
+                          content="没有级联平台显式绑定本证书。本用途只有这一张时按上级国标编码匹配兜底；有多张则拒绝猜测，需在级联编辑页逐条绑定"
                           placement="top">
                 <span style="color: #c0c4cc">未绑定</span>
               </el-tooltip>
