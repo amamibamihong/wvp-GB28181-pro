@@ -57,6 +57,17 @@ public class Gb35114NoteIntegrator {
     private org.springframework.beans.factory.ObjectProvider<
             com.genersoft.iot.vmp.gb28181.service.IDeviceService> deviceServiceProvider;
 
+    /**
+     * 按国标编码反查级联平台的服务。
+     *
+     * <p>与 {@link #deviceServiceProvider} 同理用 {@link ObjectProvider} 延迟获取：
+     * {@code IPlatformService → ISIPCommander → SipLayer → SIPProcessorObserver →
+     * Gb35114NoteIntegrator} 会形成 Bean 循环依赖。
+     */
+    @Autowired
+    private org.springframework.beans.factory.ObjectProvider<
+            com.genersoft.iot.vmp.gb28181.service.IPlatformService> platformServiceProvider;
+
     /** 把 YAML 里的 Note 参数应用到无状态的 {@link Gb35114HeaderUtil}（启动与热更新各一次）。 */
     @PostConstruct
     public void applyConfig() {
@@ -97,8 +108,18 @@ public class Gb35114NoteIntegrator {
         }
         if (vkek == null) {
             // 真的没协商过（例如设备尚未完成 Bidirection 握手）：不静默，留痕便于定位。
-            log.warn("[GB35114] 出站加签跳过 method={}, to={}：未找到该对端的 VKEK",
-                    request.getMethod(), peerId);
+            //
+            // 若对端是「配置为国密接入的级联平台」（registerWay=3/4），这就不再是普通的
+            // 未握手，而是配置与实况不符：本平台以为在国密通信，实际每条控制信令都在明文
+            // 发送。此时必须用 error 让它在默认日志级别下也显眼。
+            if (isGb35114Platform(peerId)) {
+                log.error("[GB35114] 对端 {} 配置为国密接入，但出站信令 method={} 未找到 VKEK，"
+                                + "本条信令将不带 Note 明文发送。国密握手未完成（参见注册阶段的日志）。",
+                        peerId, request.getMethod());
+            } else {
+                log.warn("[GB35114] 出站加签跳过 method={}, to={}：未找到该对端的 VKEK",
+                        request.getMethod(), peerId);
+            }
             return;
         }
 
@@ -192,6 +213,34 @@ public class Gb35114NoteIntegrator {
             // 反查失败不影响加签本身：当作没找到，由上层记日志跳过。
             log.debug("[GB35114] 按通道反查设备失败 channelId={}: {}", channelId, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 判定某个国标编码是否是「配置为国密接入的级联平台」（registerWay=3/4）。
+     *
+     * <p>用于把「该加签却没加签」从普通 warn 升级为 error：对普通设备而言，
+     * VKEK 缺失可能只是握手尚未完成；但对配了国密的上级平台，这意味着配置与实况不符，
+     * 每条控制信令都在明文发送，属于必须暴露的问题。
+     */
+    private boolean isGb35114Platform(String gbId) {
+        if (gbId == null) {
+            return false;
+        }
+        try {
+            com.genersoft.iot.vmp.gb28181.service.IPlatformService platformService =
+                    platformServiceProvider.getIfAvailable();
+            if (platformService == null) {
+                return false;
+            }
+            com.genersoft.iot.vmp.gb28181.bean.Platform platform =
+                    platformService.queryPlatformByServerGBId(gbId);
+            return platform != null
+                    && (platform.getRegisterWay() == 3 || platform.getRegisterWay() == 4);
+        } catch (Exception e) {
+            // 反查失败不影响加签判定：当作非国密平台，走普通 warn。
+            log.debug("[GB35114] 按国标编码反查级联平台失败 gbId={}: {}", gbId, e.getMessage());
+            return false;
         }
     }
 

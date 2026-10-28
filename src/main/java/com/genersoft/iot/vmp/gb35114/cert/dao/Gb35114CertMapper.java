@@ -15,7 +15,7 @@ public interface Gb35114CertMapper {
      * 改用 has_key 布尔表示"本平台是否持有私钥"。
      */
     String LITE_COLUMNS =
-            " id, purpose, type, gb_id, subject_cn, subject_dn, country, province, locality, " +
+            " id, type, gb_id, subject_cn, subject_dn, module_id, country, province, locality, " +
             " organization, organizational_unit, serial_number, ca_id, cert_pem, csr_pem, " +
             " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
             " remark, create_time, " +
@@ -23,17 +23,17 @@ public interface Gb35114CertMapper {
 
     /** 达梦 clob 列不可用 = '' 比较，改用 LENGTH。 */
     String LITE_COLUMNS_DM =
-            " id, purpose, type, gb_id, subject_cn, subject_dn, country, province, locality, " +
+            " id, type, gb_id, subject_cn, subject_dn, module_id, country, province, locality, " +
             " organization, organizational_unit, serial_number, ca_id, cert_pem, csr_pem, " +
             " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
             " remark, create_time, " +
             " CASE WHEN key_pem IS NULL OR LENGTH(key_pem) = 0 THEN 0 ELSE 1 END AS has_key ";
 
-    @Insert("INSERT INTO wvp_gb35114_cert (purpose, type, gb_id, subject_cn, subject_dn, country, province, " +
+    @Insert("INSERT INTO wvp_gb35114_cert (type, gb_id, subject_cn, subject_dn, module_id, country, province, " +
             " locality, organization, organizational_unit, serial_number, ca_id, cert_pem, key_pem, csr_pem, " +
             " not_before, not_after, validity_days, key_usage, revoked, key_fingerprint, " +
             " remark, create_time) " +
-            " VALUES (#{purpose}, #{type}, #{gbId}, #{subjectCn}, #{subjectDn}, #{country}, #{province}, " +
+            " VALUES (#{type}, #{gbId}, #{subjectCn}, #{subjectDn}, #{moduleId}, #{country}, #{province}, " +
             " #{locality}, #{organization}, #{organizationalUnit}, #{serialNumber}, #{caId}, #{certPem}, " +
             " #{keyPem}, #{csrPem}, #{notBefore}, #{notAfter}, #{validityDays}, #{keyUsage}, #{revoked}, " +
             " #{keyFingerprint}, #{remark}, #{createTime})")
@@ -53,10 +53,10 @@ public interface Gb35114CertMapper {
     @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert ORDER BY id DESC", databaseId = "dm")
     List<Gb35114Cert> queryAll();
 
-    @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert WHERE purpose=#{purpose} ORDER BY id DESC")
+    @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert WHERE type=#{type} ORDER BY id DESC")
     @Select(value = "SELECT " + LITE_COLUMNS_DM +
-            " FROM wvp_gb35114_cert WHERE purpose=#{purpose} ORDER BY id DESC", databaseId = "dm")
-    List<Gb35114Cert> queryByPurpose(String purpose);
+            " FROM wvp_gb35114_cert WHERE type=#{type} ORDER BY id DESC", databaseId = "dm")
+    List<Gb35114Cert> queryByType(String type);
 
     @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert WHERE gb_id=#{gbId} ORDER BY id DESC")
     @Select(value = "SELECT " + LITE_COLUMNS_DM +
@@ -64,13 +64,18 @@ public interface Gb35114CertMapper {
     List<Gb35114Cert> queryByGbId(String gbId);
 
     /**
-     * 按 CSR 内容查历史记录：同一份 CSR 可以多次签发（续期/重签），
+     * 按 CSR 内容与类型查历史记录：同一份 CSR 可以多次签发（续期/重签），
      * 签发时先查是否已存过，避免重复落库同一份 CSR。
+     *
+     * <p><b>必须带类型</b>：服务端证书的待签发记录里也存着 CSR，不限定类型时
+     * 一张服务端 CSR 会被「由下级 CSR 签发」这条路径找到，并按 {@code ISSUED_DEVICE}
+     * 的语义签掉（落成一张没有本地私钥的设备证书），把服务端证书的私钥记录毁掉。
      */
-    @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert WHERE csr_pem=#{csrPem} ORDER BY id DESC")
-    @Select(value = "SELECT " + LITE_COLUMNS_DM +
-            " FROM wvp_gb35114_cert WHERE csr_pem=#{csrPem} ORDER BY id DESC", databaseId = "dm")
-    List<Gb35114Cert> queryByCsrPem(@Param("csrPem") String csrPem);
+    @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert WHERE csr_pem=#{csrPem} AND type=#{type} "
+            + "ORDER BY id DESC")
+    @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert WHERE csr_pem=#{csrPem} "
+            + "AND type=#{type} ORDER BY id DESC", databaseId = "dm")
+    List<Gb35114Cert> queryByCsrPem(@Param("csrPem") String csrPem, @Param("type") String type);
 
     /** 仅回填 CSR（记录已存在时不覆盖已有证书）。 */
     @Update("UPDATE wvp_gb35114_cert SET csr_pem=#{csrPem} WHERE id=#{id} AND (csr_pem IS NULL OR csr_pem = '')")
@@ -79,16 +84,16 @@ public interface Gb35114CertMapper {
     int updateCsrPem(@Param("id") int id, @Param("csrPem") String csrPem);
 
     /**
-     * UAS 侧验 sign1 用：按国标 ID 取「下级客户端证书」（按 id 倒序，最新的在前）。
+     * UAS 侧验 sign1 用：按国标 ID 取「客户端证书（下级设备）」（按 id 倒序，最新的在前）。
      *
      * <p>吊销与有效期过滤放在 Java 层做，避免 revoked 列在 MySQL(tinyint)/PG(bool)/达梦(bit)
      * 三方言下布尔比较不兼容。
      */
     @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert " +
-            " WHERE gb_id=#{gbId} AND purpose='" + Gb35114Cert.PURPOSE_ISSUED_DEVICE + "' " +
+            " WHERE gb_id=#{gbId} AND type='" + Gb35114Cert.TYPE_ISSUED_DEVICE + "' " +
             " ORDER BY id DESC")
     @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert " +
-            " WHERE gb_id=#{gbId} AND purpose='" + Gb35114Cert.PURPOSE_ISSUED_DEVICE + "' " +
+            " WHERE gb_id=#{gbId} AND type='" + Gb35114Cert.TYPE_ISSUED_DEVICE + "' " +
             " ORDER BY id DESC", databaseId = "dm")
     List<Gb35114Cert> queryIssuedDeviceCert(@Param("gbId") String gbId);
 
@@ -145,33 +150,33 @@ public interface Gb35114CertMapper {
      * <p>吊销/有效期/私钥的过滤放在 Java 层，规避三方言布尔与 clob 差异。
      */
     @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert " +
-            " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' " +
+            " WHERE type='" + Gb35114Cert.TYPE_SERVER_IDENTITY + "' " +
             " ORDER BY id DESC")
     @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert " +
-            " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' " +
+            " WHERE type='" + Gb35114Cert.TYPE_SERVER_IDENTITY + "' " +
             " ORDER BY id DESC", databaseId = "dm")
     List<Gb35114Cert> queryServerIdentities();
 
     /** 按公钥指纹查同组证书（同一个签名身份）。 */
     @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert " +
-            " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' AND key_fingerprint=#{fp} " +
+            " WHERE type='" + Gb35114Cert.TYPE_SERVER_IDENTITY + "' AND key_fingerprint=#{fp} " +
             " ORDER BY id DESC")
     @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert " +
-            " WHERE purpose='" + Gb35114Cert.PURPOSE_SERVER_IDENTITY + "' AND key_fingerprint=#{fp} " +
+            " WHERE type='" + Gb35114Cert.TYPE_SERVER_IDENTITY + "' AND key_fingerprint=#{fp} " +
             " ORDER BY id DESC", databaseId = "dm")
     List<Gb35114Cert> queryServerIdentitiesByFingerprint(@Param("fp") String fp);
 
     /**
-     * 按公钥指纹查下级客户端证书（校验设备自报证书是否已被本平台吊销）。
+     * 按公钥指纹查客户端证书（下级设备），校验设备自报证书是否已被本平台吊销。
      *
      * <p>设备在 Capability 的 cnonce 里自报证书时不经过数据库，需按指纹反查才能
      * 知道这张证书是否已被吊销。
      */
     @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert " +
-            " WHERE purpose='" + Gb35114Cert.PURPOSE_ISSUED_DEVICE + "' AND key_fingerprint=#{fp} " +
+            " WHERE type='" + Gb35114Cert.TYPE_ISSUED_DEVICE + "' AND key_fingerprint=#{fp} " +
             " ORDER BY id DESC")
     @Select(value = "SELECT " + LITE_COLUMNS_DM + " FROM wvp_gb35114_cert " +
-            " WHERE purpose='" + Gb35114Cert.PURPOSE_ISSUED_DEVICE + "' AND key_fingerprint=#{fp} " +
+            " WHERE type='" + Gb35114Cert.TYPE_ISSUED_DEVICE + "' AND key_fingerprint=#{fp} " +
             " ORDER BY id DESC", databaseId = "dm")
     List<Gb35114Cert> queryIssuedDeviceCertsByFingerprint(@Param("fp") String fp);
 
@@ -183,6 +188,17 @@ public interface Gb35114CertMapper {
     /** 统计某 CA 签发的证书数（删除 CA 前的引用校验）。 */
     @Select("SELECT COUNT(0) FROM wvp_gb35114_cert WHERE ca_id=#{caId}")
     int countByCaId(@Param("caId") int caId);
+
+    /**
+     * 某 CA 签发的证书清单（CA 页面点开「关联证书」用）。
+     *
+     * <p>按签发时间倒序，最新签发的排在最前 —— 排查「这张 CA 还在不在用」时，
+     * 先看到的应该是最近签的那张。
+     */
+    @Select("SELECT " + LITE_COLUMNS + " FROM wvp_gb35114_cert WHERE ca_id=#{caId} ORDER BY id DESC")
+    @Select(value = "SELECT " + LITE_COLUMNS_DM +
+            " FROM wvp_gb35114_cert WHERE ca_id=#{caId} ORDER BY id DESC", databaseId = "dm")
+    List<Gb35114Cert> queryByCaId(@Param("caId") int caId);
 
     @Delete("DELETE FROM wvp_gb35114_cert WHERE id=#{id}")
     int delete(int id);

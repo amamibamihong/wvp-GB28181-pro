@@ -63,6 +63,9 @@ gb35114:
   key-encrypt-password: ${WVP_GB35114_KEY_PWD}
   # 证书默认有效期（天）
   cert-validity-days: 3650
+  # 证书主题 CN 里「设备ID_密码模块ID」后半段用的密码模块 ID（22 位十进制，附录 A 表 A.1 / 附录 B）。
+  # 留空即 22 个 0 占位；有备案的密码模块编号时由运维填这里，页面「创建 CSR」的默认主题会带上它。
+  module-id: ''
 
 # zlm 默认服务器配置（本次测试不部署 zlm，保留占位）
 media:

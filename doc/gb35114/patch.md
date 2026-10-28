@@ -20,9 +20,12 @@
 | 基线日期 | 2026-08-29 |
 | 基线说明 | `Merge pull request #2220 from xiaoQQya/fix/heartbeat` |
 | 版本 | wvp-GB28181-pro 2.7.4 |
-| 补丁规模 | 65 个文件，其中 **42 个新增文件**（约 1.15 万行新增，37 行删除） |
+| 补丁规模 | 94 个文件，其中 **81 个新增文件**（约 2.07 万行新增，45 行删除） |
 
-> 行数随文档修订小幅浮动；**文件数（60 个业务文件 + 5 个文档文件）是稳定的**。
+> 行数随文档修订小幅浮动；**文件数（92 个文本文件 + 2 张 PNG 图）是稳定的**。
+>
+> 统计口径：`git apply --numstat gb35114.patch` 汇总 —— 这是补丁**内容**的规模。
+> 不要用 `git diff --stat` 去量补丁文件本身，那会把 `gb35114.patch` 自己的上万行也算进去。
 
 **这份补丁是在上述 commit 的工作区上 `git diff --cached --binary HEAD` 得到的**，
 即补丁的相对路径与仓库根目录一致，用 `git apply -p1`（默认）即可。
@@ -99,16 +102,20 @@ git apply --numstat gb35114.patch   # 增删行数
 | `gb28181/bean/GBStringMsgParser.java` | 无 listener 分支加 `message.addUnparsed(header)` | **必须保留**。丢了会导致 Note 验签拿不到 `Date` |
 | `gov/nist/javax/sip/stack/CustomNioTcpMessageProcessor.java` | 覆写 `send(SocketChannel, byte[])` + `ensureChannelCached`；**撤掉**原有的两个 `createMessageChannel` 覆写 | **必须保留**。若上游也改了这里，以"不覆写 `createMessageChannel`、只覆写 `send`"为原则合并 |
 | `gb28181/bean/Device.java` / `Platform.java` | 各加 2~3 个字段 | 纯新增，几乎不冲突 |
-| `gb28181/dao/DeviceMapper.java` / `PlatformMapper.java` | 增列的进出 SQL | 若上游改了这些 SQL，按"保留新列"合并 |
+| `gb28181/dao/DeviceMapper.java` / `PlatformMapper.java` | 增列的进出 SQL；`PlatformMapper` 另加 4 个只改单列的绑定方法（`bindDeviceCert` / `bindPlatformCert` / `clear*CertBinding`） | 若上游改了这些 SQL，按"保留新列"合并 |
+| `gb28181/controller/PlatformController.java` | `add` / `update` 透传两个证书 ID 字段 | 纯透传，冲突时保留 |
+| `conf/SpringDocConfig.java` | 新增「7. GB35114 国密」`GroupedOpenApi` 分组，并把撞号的组号重排 | 与国密功能无关，纯文档分组；新版本若已重排组号，保留其写法、只需保证 gb35114 包有独立分组 |
 | `pom.xml` | 新增 `bcprov-jdk18on` 依赖 | 纯新增 |
 
 **新增文件不会冲突**（除非新版本里恰好有同名文件）：
 
-- `src/main/java/com/genersoft/iot/vmp/gb35114/**`（21 个文件）
-- `src/test/java/com/genersoft/iot/vmp/gb35114/**`（6 个文件）
-- `web/src/api/gb35114.js`、`web/src/views/gb35114/index.vue`
+- `src/main/java/com/genersoft/iot/vmp/gb35114/**`（22 个文件）
+- `src/test/java/com/genersoft/iot/vmp/gb35114/**`（25 个文件）
+- `web/src/api/gb35114.js`、`web/src/views/gb35114/index.vue`、
+  `web/src/views/platform/CertChip.vue`（级联编辑页的证书槽组件）
 - `数据库/2.7.4/更新-gb35114-*.sql`（3 个）
 - `docker/gb35114-deploy/**`
+- `doc/gb35114/assets/*.svg|png`（证书流向图）
 
 ---
 
@@ -167,19 +174,35 @@ mvn -o -q -DskipTests package
 mvn -o test -Dtest='Gb35114*'
 ```
 
-`Gb35114*` 六个测试类共 34 个用例，覆盖证书密钥复用（`Gb35114CertUtilKeyReuseTest`）、
+`Gb35114*` **25 个测试类共 203 个用例**，覆盖证书密钥复用（`Gb35114CertUtilKeyReuseTest`）、
 SIP 头构造与解析（`Gb35114HeaderUtilTest`）、401 挑战头 golden 值
 （`Gb35114ChallengeGoldenTest`）、SM2/SM3/VKEK 封装（`Gb35114SmCryptoTest`）、
 UAS/UAC 握手状态机（`Gb35114StateMachineTest`）、签发者反查
-（`Gb35114IssuerResolveTest`）—— **合并后这几个测试全过**，说明核心逻辑移植成功。
+（`Gb35114IssuerResolveTest` / `Gb35114IssuerResolveServiceTest`）、证书链校验
+（`Gb35114CertChainTest` / `Gb35114CertChainServiceTest` / `Gb35114UacChainHookTest`）、
+设备证书主题格式（`Gb35114DeviceCnServiceTest`）、CA 主题
+（`Gb35114CaSubjectServiceTest`）、删除证书的引用守卫
+（`Gb35114CertReferenceGuardTest`）、链校验跳过与签发者 DN 快速映射
+（`Gb35114CertChainSkipAndDnNarrowTest`）、UAS/UAC 回环（`Gb35114UasLoopbackTest` /
+`Gb35114UacLoopbackTest`）、**CA 管理**（`Gb35114CaManagementTest` —— 本地根 CA 唯一性、
+被引用的 CA 删除守卫、受信任的 CA 不受唯一性限制、关联证书计数）、
+**服务端证书的 CSR 路径**（`Gb35114ServerCsrServiceTest` —— 待签发守卫的用途门控、
+用本地根 CA 签发与自签的配对校验）、**受信任 CA 签发的设备证书**
+（`Gb35114TrustedCaDeviceCertTest` —— 链校验候选集含受信任 CA、
+但"无记录仍拒绝"这道闸不动）、**上级证书链默认校验**（`Gb35114UpstreamChainDefaultTest` ——
+默认值恒为 true、缺 CA 时拒绝、置 false 即不注入、`skip-cert-chain-verify` 放行）、
+**证书绑定级联平台**（`Gb35114CertBindToPlatformTest`）、**删除平台连带删证书**
+（`Gb35114PlatformDeleteCascadeTest`）、**删除并解绑**（`Gb35114CertUnbindAndDeleteTest`）、
+**密码模块 ID 配置**（`Gb35114ModuleIdConfigTest`）、**VKEK 周期**（`Gb35114VkekPeriodTest`）
+—— **合并后这几个测试全过**，说明核心逻辑移植成功。
 
 > ⚠️ `pom.xml` 里 `maven-surefire-plugin` 配了 `<skipTests>true</skipTests>`，
 > 直接 `mvn test -Dtest='Gb35114*'` **不会真的跑**（只打印 BUILD SUCCESS，
 > 不产生 `target/surefire-reports/`）。命令行加 `-DskipTests=false` **也覆盖不了**
-> （实测无效，pom 里的配置优先）—— 需要临时把那一行改成 `false`。
+> （实测无效，pom 里的配置优先）。绕过 surefire 直接跑的做法见 `install.md` §4.3。
 >
 > **已实测**：本补丁在基线 `fb45787` 的干净检出差上 `git apply` 后 `mvn compile` 通过，
-> 34 个 GB35114 用例全绿。
+> 203 个 GB35114 用例全绿（`git apply --check` 无冲突）。
 
 ---
 
@@ -209,6 +232,25 @@ UAS/UAC 握手状态机（`Gb35114StateMachineTest`）、签发者反查
 | jain-sip | 1.3.0-91 —— `CustomNioTcpMessageProcessor` 的修补是针对这个版本的内部实现（`NIOHandler.sendBytes` / `openOutgoingConnection` / `blockingConnect` 的调用顺序）。**换 jain-sip 版本需重新核对该时序** |
 | 数据库 | MySQL / PostgreSQL / KingbaseES / 达梦 DM8 四套脚本。达梦版用 `SYSOBJECTS` 判表、`USER_TAB_COLUMNS` 判列，clob 列判空用 `LENGTH(...) = 0`（达梦 clob 不可用 `= ''` 比较） |
 | 前端 | Vue 2 + Element UI（与 2.7.4 一致） |
+
+### 6.1 为什么合不到 2.7.3 / 2.7.2（已核实，不必重查）
+
+**2.7.3 及更早的版本是硬断层，不是"冲突多一点"的问题**，两道门槛各自独立：
+
+| 断层 | 2.7.3 实测 | 2.7.4 基线 | 后果 |
+|---|---|---|---|
+| Spring Boot | **2.7.18** | 3.x | 全项目 `javax.*` → `jakarta.*` 改名 |
+| Servlet 命名空间 | `javax.servlet`（18 个文件），`jakarta.*` **0 处** | 全部 `jakarta.*` | 补丁里所有 `jakarta.servlet.http.HttpServletResponse`、`jakarta.annotation.PostConstruct` 等 import 在 2.7.3 上**根本不存在**，编译必失败 |
+| 前端布局 | `web_src/src/components/*.vue`（89 个 .vue，**无 `views/`、无 `api/` 目录**） | `web/src/views/` + `web/src/api/` | 补丁新增的 `web/src/views/gb35114/index.vue`、`web/src/api/gb35114.js`、`web/src/views/platform/CertChip.vue` **无处可落** |
+
+2.7.3 相对基线 `fb45787` 落后 **1880 个提交**，15 个既有后端改动文件大概率全部漂移。
+
+`jain-sip` 版本两者一致（都是 `1.3.0-91`），所以 `CustomNioTcpMessageProcessor` 的修补**是唯一能直接搬过去的部分**。
+
+> 真要移植到 2.7.3，工作量大且性质变了 —— 不是"应用补丁"，而是**用 2.7.3 的 API 重写一遍**：
+> ① 全部 `jakarta` → `javax`；② 前端页面按 `web_src/src/components/` 的扁平组件形态重做，
+> 路由改 `web_src/src/router/index.js`；③ 15 个漂移文件逐个手工合并。
+> 建议先明确动机（现场部署 / 可移植性验证）再决定是否值得。
 
 ---
 

@@ -49,7 +49,13 @@ public class Gb35114PlatformStateMachine {
 
     private final String serverId;
     private final Gb35114CertUtil.Gb35114Identity identity; // 平台 SM2 签名身份（Bidirection 用）
-    private final Mode mode; // 固定方案（identity 存在则为 Bidirection，否则 Unidirection）
+    /**
+     * 平台默认认证方案（identity 存在则为 Bidirection，否则 Unidirection）。
+     *
+     * <p>这只是<b>兜底默认值</b>。实际会话方案由 {@link #challenge(String, String, Mode)}
+     * 的调用方按平台配置（{@code gb35114.auth-mode}）传入 —— 见该方法说明。
+     */
+    private final Mode mode;
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
     private final Map<String, X509Certificate> provisionedCerts = new ConcurrentHashMap<>();
 
@@ -146,8 +152,34 @@ public class Gb35114PlatformStateMachine {
     /**
      * 记录 Capability 宣告（解析可选的 cnonce 设备证书），并为该设备生成
      * random1 挑战，返回 401 的完整 WWW-Authenticate 头值。
+     *
+     * <p>使用平台默认方案（{@link #mode()}）。平台侧统一设置认证方式时，
+     * 由调用方用 {@link #challenge(String, String, Mode)} 传入配置值。
      */
     public String challenge(String deviceId, String capabilityAuthorization) {
+        return challenge(deviceId, capabilityAuthorization, mode);
+    }
+
+    /**
+     * 记录 Capability 宣告并为该设备生成 random1 挑战，<b>显式指定本次会话的认证方案</b>。
+     *
+     * <p>GB 35114—2017 6.4.2 要求管理平台对「所有接入的 FDWSF」进行单向<b>或者</b>双向
+     * 设备身份认证 —— 主语是「所有接入的 FDWSF」，两种方式二选一，属<b>平台级设置</b>。
+     * 故方案由调用方按配置传入（见 {@code gb35114.auth-mode}）。
+     *
+     * <p>挑战里的 scheme 也是设备应答的依据：设备按收到的 scheme 回应
+     * （C.2.1.2 c) / C.2.2.2 c) 均规定 Authorization 取值与挑战一致）。
+     *
+     * @param requestedMode 本次会话方案；{@code null} 表示用平台默认方案
+     */
+    public String challenge(String deviceId, String capabilityAuthorization, Mode requestedMode) {
+        Mode effective = requestedMode != null ? requestedMode : mode;
+        if (effective == Mode.Bidirection && identity == null) {
+            // 双向要求平台用私钥签 sign2，没有签名身份就做不到。宁可在这里明确失败，
+            // 也不要发出 Bidirection 挑战后在 verifyRegister 才炸，让人误判成设备证书问题。
+            throw new Gb35114Exception(
+                    "Bidirection requires a platform identity, but none is configured");
+        }
         String random1 = Gb35114SmCrypto.randomB64(16);
 
         X509Certificate announcedCert = null;
@@ -168,7 +200,7 @@ public class Gb35114PlatformStateMachine {
         Session session = sessions.computeIfAbsent(deviceId, k -> new Session());
         String negotiated = Gb35114HeaderUtil.negotiateAlgorithm(announcedAlgorithm);
         synchronized (session) {
-            session.mode = mode;
+            session.mode = effective;
             session.random1 = random1;
             session.lastAuth = null;
             session.lastSecurityInfo = null;
@@ -179,7 +211,7 @@ public class Gb35114PlatformStateMachine {
         }
         // 挑战里的 algorithm 必须是「从设备上报能力中选出的」结果（标准 §C.3 b)），
         // 只回内置的 A:SM2;H:SM3 会让协商结果与设备预期不符。
-        return Gb35114HeaderUtil.buildChallenge(mode, random1, announcedAlgorithm);
+        return Gb35114HeaderUtil.buildChallenge(effective, random1, announcedAlgorithm);
     }
 
     /**

@@ -56,6 +56,29 @@ public class Gb35114SecurityService {
     }
 
     /**
+     * 平台侧设备接入的认证方式（{@code gb35114.auth-mode}）。
+     *
+     * <p>GB 35114—2017 6.4.2 的「单向<b>或者</b>双向」是平台级二选一设置，
+     * 本方法把它解析为挑战用的 scheme。配置值非法时回退 Bidirection 并告警
+     * —— 宁可维持双向（更严），也不要在拼错配置时静默降级成单向。
+     */
+    public Gb35114HeaderUtil.Mode authMode() {
+        String raw = config.getAuthMode();
+        if (raw == null || raw.trim().isEmpty()) {
+            return Gb35114HeaderUtil.Mode.Bidirection;
+        }
+        String v = raw.trim();
+        if ("Unidirection".equalsIgnoreCase(v) || "4".equals(v)) {
+            return Gb35114HeaderUtil.Mode.Unidirection;
+        }
+        if (!"Bidirection".equalsIgnoreCase(v) && !"3".equals(v)) {
+            log.warn("[GB35114] gb35114.auth-mode 取值无法识别：{}，按 Bidirection 处理"
+                    + "（可选：Bidirection / Unidirection）", raw);
+        }
+        return Gb35114HeaderUtil.Mode.Bidirection;
+    }
+
+    /**
      * 获取 UAS 平台侧状态机（按设备实际信任的证书选择签名身份）。
      *
      * <p>证书选择优先级：
@@ -87,7 +110,7 @@ public class Gb35114SecurityService {
                 identity = certService.loadIdentity(resolved);
             }
             Gb35114PlatformStateMachine machine = new Gb35114PlatformStateMachine(stateMachineKey, identity);
-            // 动态设备证书来源：只信任本平台签发给下级的、未吊销且未过期的下级客户端证书
+            // 动态设备证书来源：只信任本平台签发给下级的、未吊销且未过期的客户端证书（下级设备）
             machine.setCertProvider(deviceId -> {
                 Gb35114Cert cert = certService.queryIssuedDeviceCert(deviceId);
                 return cert == null ? null : certService.loadCert(cert.getId());
@@ -155,7 +178,7 @@ public class Gb35114SecurityService {
      * <p>顺延<b>绝不跨密钥组</b>：那等于悄悄换掉设备信任的公钥，设备验 sign2 必然失败，
      * 且平台日志上一切正常（确实签了名，只是用错了身份），故障点会漂到设备侧。
      *
-     * @throws Gb35114Exception 指定的证书已吊销、用途不符，或同组内已无可用证书
+     * @throws Gb35114Exception 指定的证书已吊销、类型不符，或同组内已无可用证书
      */
     private Integer resolveServerCertId(Integer deviceBoundCertId) {
         if (deviceBoundCertId != null) {
@@ -203,9 +226,9 @@ public class Gb35114SecurityService {
     }
 
     /**
-     * 加载本平台作为下级注册用的设备身份（本地客户端证书，DEVICE_IDENTITY）。
+     * 加载本平台作为下级注册用的设备身份（客户端证书（本平台）、DEVICE_IDENTITY）。
      *
-     * <p>该用途<b>不唯一</b>（可接入多个上级），按 {@code gbId} 解析；解析不到时返回
+     * <p>该类型<b>不唯一</b>（可接入多个上级），按 {@code gbId} 解析；解析不到时返回
      * {@code null}，由调用方给出「未配置证书」的明确报错 —— 详见
      * {@link IGb35114CertService#queryDeviceIdentity(String)}。
      */
@@ -256,7 +279,7 @@ public class Gb35114SecurityService {
      * <p>证书优先取<b>上级平台（per-platform）配置</b>（{@code wvp_platform.device_cert_id} /
      * {@code platform_cert_id}，调用方从 {@code parentPlatform} 传入），未配置时<b>从证书表按
      * 上级国标编码解析</b>。这支撑「一个下级平台接入多个上级」：每个上级绑自己的那张证书，
-     * 互不干扰；没绑定时只要该用途只有一张也能跑起来。
+     * 互不干扰；没绑定时只要该类型只有一张也能跑起来。
      *
      * <p>不再回退 {@code gb35114.device-cert-id} 这类全局配置 —— 全局只能容纳一个上级，
      * 接入第二个时要么改配置影响第一个，要么解析出错，且配置里写数据库主键在证书重建后悬空。
@@ -279,8 +302,15 @@ public class Gb35114SecurityService {
                 ? platformCertId
                 : idOf(certService.queryTrustedPlatformCert(serverId));
         X509Certificate platformCert = loadPlatformCert(effectivePlatformCertId);
-        return deviceStateMachine(identity, platformCert, deviceId, serverId,
+        Gb35114DeviceStateMachine machine = deviceStateMachine(identity, platformCert, deviceId, serverId,
                 effectiveDeviceCertId, effectivePlatformCertId);
+        // 只在开关打开且确实有上级证书时才注入：没有平台证书时该方向本来就走不通
+        // （Bidirection 下 verifyOk 会以「缺证书」失败），不必在此提前报错，
+        // 那会把「未导入上级证书」和「链不成立」两种原因混成一条信息。
+        if (machine != null && config.isVerifyUpstreamCertChain() && platformCert != null) {
+            machine.setPlatformCertValidator(certService::validateUpstreamPlatformCertChain);
+        }
+        return machine;
     }
 
     /** 按证书 ID 加载设备身份，null 表示无。 */

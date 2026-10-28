@@ -19,6 +19,7 @@ IF V_CNT = 0 THEN
         EXECUTE IMMEDIATE 'CREATE TABLE wvp_gb35114_ca
 (
     id            int identity(1,1) primary key,
+    type          varchar(20) default 'LOCAL_CA',
     subject_cn    varchar(255),
     serial_number varchar(100),
     cert_pem      clob,
@@ -31,6 +32,7 @@ END IF;
 END;
 /
 COMMENT ON COLUMN wvp_gb35114_ca.id IS '主键ID';
+COMMENT ON COLUMN wvp_gb35114_ca.type IS '类型：LOCAL_CA-本地CA(可签发，全局唯一) / TRUSTED_CA-受信任的CA(仅公钥，可重复导入)';
 COMMENT ON COLUMN wvp_gb35114_ca.subject_cn IS '主题 CN';
 COMMENT ON COLUMN wvp_gb35114_ca.serial_number IS '序列号';
 COMMENT ON COLUMN wvp_gb35114_ca.cert_pem IS '证书 PEM';
@@ -48,7 +50,7 @@ IF V_CNT = 0 THEN
         EXECUTE IMMEDIATE 'CREATE TABLE wvp_gb35114_cert
 (
     id            int identity(1,1) primary key,
-    type          int,
+    type          varchar(30) default 'ISSUED_DEVICE',
     gb_id         varchar(50),
     subject_cn    varchar(255),
     serial_number varchar(100),
@@ -64,7 +66,7 @@ END IF;
 END;
 /
 COMMENT ON COLUMN wvp_gb35114_cert.id IS '主键ID';
-COMMENT ON COLUMN wvp_gb35114_cert.type IS '证书类型：1-服务器证书，2-设备证书';
+COMMENT ON COLUMN wvp_gb35114_cert.type IS '证书类型：SERVER_IDENTITY-服务端证书(本平台) / DEVICE_IDENTITY-客户端证书(本平台) / ISSUED_DEVICE-客户端证书(下级设备) / TRUSTED_PLATFORM-服务端证书(上级平台)';
 COMMENT ON COLUMN wvp_gb35114_cert.gb_id IS '关联国标 ID';
 COMMENT ON COLUMN wvp_gb35114_cert.subject_cn IS '主题 CN';
 COMMENT ON COLUMN wvp_gb35114_cert.serial_number IS '序列号';
@@ -131,16 +133,23 @@ COMMENT ON COLUMN wvp_platform.platform_cert_id IS '受信上级平台证书ID�
  *============================================================================*/
 
 -- ---- 证书表新增列 ----
+-- purpose 只在「老库」补：老库的 type 是整数（1-服务器/2-设备），需要先补出 purpose
+-- 承载四个字符串取值，再由后面的迁移段把 purpose 改名为 type、删掉整数 type。
+-- 新装库的 type 建表时已是 varchar(30)，不需要也不该再加一列 purpose。
 DECLARE
 V_CNT INT;
+V_OLDTYPE INT;
 BEGIN
 SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'PURPOSE';
-IF V_CNT = 0 THEN
+SELECT COUNT(*) INTO V_OLDTYPE FROM USER_TAB_COLUMNS
+ WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'TYPE'
+   AND DATA_TYPE IN ('INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT');
+IF V_CNT = 0 AND V_OLDTYPE > 0 THEN
         EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert ADD purpose varchar(30) default ''ISSUED_DEVICE''';
+        EXECUTE IMMEDIATE 'COMMENT ON COLUMN wvp_gb35114_cert.purpose IS ''类型：SERVER_IDENTITY/DEVICE_IDENTITY/ISSUED_DEVICE/TRUSTED_PLATFORM''';
 END IF;
 END;
 /
-COMMENT ON COLUMN wvp_gb35114_cert.purpose IS '用途：SERVER_IDENTITY/DEVICE_IDENTITY/ISSUED_DEVICE/TRUSTED_PLATFORM';
 
 DECLARE
 V_CNT INT;
@@ -252,17 +261,37 @@ END;
 /
 COMMENT ON COLUMN wvp_gb35114_cert.key_usage IS '密钥用途扩展，如 digitalSignature、keyCertSign|cRLSign';
 
--- ---- CA 表新增列 ----
+-- 密码模块 ID：GB 35114—2017 附录 A 表 A.1 第 6 项规定设备证书 CN 为
+-- 「设备ID_密码模块ID」。单列出来是为满足 GB/T 43026—2023 表 4 序号 1
+-- 「设备身份管理」——该检验项要求平台展示「设备 ID、其密码模块 ID 与设备证书
+-- 的对应关系」，只给一个 CN 字符串过不了。存量记录留空，新签发/新导入自动解析。
 DECLARE
 V_CNT INT;
 BEGIN
-SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'PURPOSE';
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'MODULE_ID';
 IF V_CNT = 0 THEN
-        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD purpose varchar(20) default ''LOCAL_CA''';
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert ADD module_id varchar(64)';
 END IF;
 END;
 /
-COMMENT ON COLUMN wvp_gb35114_ca.purpose IS '用途：LOCAL_CA-本地CA（可签发），TRUSTED_CA-上级CA（仅公钥，标识签发者）';
+COMMENT ON COLUMN wvp_gb35114_cert.module_id IS '密码模块 ID（附录B，22位十进制）；空表示无密码模块';
+
+-- ---- CA 表新增列 ----
+-- 老库这里补的仍是 purpose，由后面的迁移段统一改名为 type —— 与证书表同步，
+-- 也让紧随其后的「存量数据归类」能照旧按 purpose 写入。
+-- 新装库建表时就是 type，两个条件都不成立，本段跳过。
+DECLARE
+V_CNT INT;
+V_TYPE INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'PURPOSE';
+SELECT COUNT(*) INTO V_TYPE FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'TYPE';
+IF V_CNT = 0 AND V_TYPE = 0 THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD purpose varchar(20) default ''LOCAL_CA''';
+        EXECUTE IMMEDIATE 'COMMENT ON COLUMN wvp_gb35114_ca.purpose IS ''用途：LOCAL_CA-本地CA（可签发），TRUSTED_CA-上级CA（仅公钥，标识签发者）''';
+END IF;
+END;
+/
 
 DECLARE
 V_CNT INT;
@@ -275,13 +304,98 @@ END;
 /
 COMMENT ON COLUMN wvp_gb35114_ca.remark IS '备注';
 
--- ---- 索引 ----
+-- CA 表补齐主题 DN 各段，与证书表口径一致：界面上「生成本地根 CA」收的
+-- C/ST/L/O/OU 会真的写进证书并落库，不再出现「DN 里有 C=CN、country 列却是 NULL」。
 DECLARE
 V_CNT INT;
 BEGIN
-SELECT COUNT(*) INTO V_CNT FROM SYSOBJECTS WHERE NAME = 'IDX_GB35114_CERT_PURPOSE' AND TYPE$ = 'SCHOBJ';
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'SUBJECT_DN';
 IF V_CNT = 0 THEN
-        EXECUTE IMMEDIATE 'CREATE INDEX idx_gb35114_cert_purpose ON wvp_gb35114_cert (purpose, gb_id)';
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD subject_dn varchar(500)';
+END IF;
+END;
+/
+COMMENT ON COLUMN wvp_gb35114_ca.subject_dn IS '完整主题DN（RFC2253）';
+
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'COUNTRY';
+IF V_CNT = 0 THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD country varchar(10)';
+END IF;
+END;
+/
+COMMENT ON COLUMN wvp_gb35114_ca.country IS '国家 C';
+
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'PROVINCE';
+IF V_CNT = 0 THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD province varchar(64)';
+END IF;
+END;
+/
+COMMENT ON COLUMN wvp_gb35114_ca.province IS '省份 ST';
+
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'LOCALITY';
+IF V_CNT = 0 THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD locality varchar(64)';
+END IF;
+END;
+/
+COMMENT ON COLUMN wvp_gb35114_ca.locality IS '城市 L';
+
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'ORGANIZATION';
+IF V_CNT = 0 THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD organization varchar(255)';
+END IF;
+END;
+/
+COMMENT ON COLUMN wvp_gb35114_ca.organization IS '组织 O';
+
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'ORGANIZATIONAL_UNIT';
+IF V_CNT = 0 THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca ADD organizational_unit varchar(255)';
+END IF;
+END;
+/
+COMMENT ON COLUMN wvp_gb35114_ca.organizational_unit IS '组织单位 OU';
+
+-- 存量 CA 的 DN 各段回填：证书 PEM 无法在 SQL 里解析，只能按已有 subject_cn 兜底。
+-- 新生成/新导入的 CA 会由服务端从证书反解析自动写入。
+UPDATE wvp_gb35114_ca SET subject_dn = CONCAT('CN=', subject_cn) WHERE subject_dn IS NULL;
+
+-- ---- 索引 ----
+-- 建在「当前存在的那一列」上：老库是 purpose（迁移段改名时索引名一并统一），
+-- 新装库是 type。列名动态拼，避免新装库因 purpose 不存在而报错。
+DECLARE
+V_CNT INT;
+V_CNT_TYPE INT;
+V_HAS_PURPOSE INT;
+BEGIN
+-- 两个索引名都要查：老库建的是 idx_gb35114_cert_purpose，新装库建的是
+-- idx_gb35114_cert_type。只查其一会让另一条路径重跑时重复建索引而报错。
+SELECT COUNT(*) INTO V_CNT FROM SYSOBJECTS WHERE NAME = 'IDX_GB35114_CERT_PURPOSE' AND TYPE$ = 'SCHOBJ';
+SELECT COUNT(*) INTO V_CNT_TYPE FROM SYSOBJECTS WHERE NAME = 'IDX_GB35114_CERT_TYPE' AND TYPE$ = 'SCHOBJ';
+SELECT COUNT(*) INTO V_HAS_PURPOSE FROM USER_TAB_COLUMNS
+ WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'PURPOSE';
+IF V_CNT = 0 AND V_CNT_TYPE = 0 THEN
+        IF V_HAS_PURPOSE > 0 THEN
+                EXECUTE IMMEDIATE 'CREATE INDEX idx_gb35114_cert_purpose ON wvp_gb35114_cert (purpose, gb_id)';
+        ELSE
+                EXECUTE IMMEDIATE 'CREATE INDEX idx_gb35114_cert_type ON wvp_gb35114_cert (type, gb_id)';
+        END IF;
 END IF;
 END;
 /
@@ -289,33 +403,100 @@ END;
 /*============================================================================
  * 存量数据归类（启发式，执行后请人工核对各 tab 归类是否正确）
  * 达梦 clob 判空用 LENGTH(...) = 0
+ *
+ * 整段包在匿名块里并以「purpose 列还在不在」为闸：本段依赖 purpose（写入目标）与
+ * type（整数，推断依据）两列并存，而紧随其后的迁移段会把 purpose 改名为 type 并
+ * 删掉整数 type。重跑本脚本时 purpose 已不存在，裸跑这些 UPDATE 会因未知列报错 ——
+ * 有了这道闸，重复执行安全。
  *============================================================================*/
-UPDATE wvp_gb35114_cert SET purpose = 'TRUSTED_PLATFORM'
- WHERE id IN (SELECT platform_cert_id FROM wvp_platform WHERE platform_cert_id IS NOT NULL);
+DECLARE
+V_HAS_PURPOSE INT;
+BEGIN
+SELECT COUNT(*) INTO V_HAS_PURPOSE FROM USER_TAB_COLUMNS
+ WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'PURPOSE';
+IF V_HAS_PURPOSE > 0 THEN
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET purpose = ''TRUSTED_PLATFORM''
+     WHERE id IN (SELECT platform_cert_id FROM wvp_platform WHERE platform_cert_id IS NOT NULL)';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET purpose = ''DEVICE_IDENTITY''
+     WHERE id IN (SELECT device_cert_id FROM wvp_platform WHERE device_cert_id IS NOT NULL)
+        OR id IN (SELECT cert_id FROM wvp_device WHERE cert_id IS NOT NULL)';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET purpose = ''ISSUED_DEVICE''
+     WHERE type = 2 AND (key_pem IS NULL OR LENGTH(key_pem) = 0)';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET purpose = ''DEVICE_IDENTITY''
+     WHERE type = 2 AND key_pem IS NOT NULL AND LENGTH(key_pem) > 0';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET purpose = ''TRUSTED_PLATFORM''
+     WHERE type = 1 AND (key_pem IS NULL OR LENGTH(key_pem) = 0)';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET purpose = ''SERVER_IDENTITY''
+     WHERE type = 1 AND key_pem IS NOT NULL AND LENGTH(key_pem) > 0';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET purpose = ''ISSUED_DEVICE'' WHERE purpose IS NULL';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_ca SET purpose = ''LOCAL_CA''
+     WHERE key_pem IS NOT NULL AND LENGTH(key_pem) > 0';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_ca SET purpose = ''TRUSTED_CA''
+     WHERE purpose IS NULL OR key_pem IS NULL OR LENGTH(key_pem) = 0';
+    EXECUTE IMMEDIATE 'UPDATE wvp_gb35114_cert SET key_usage = ''digitalSignature'' WHERE key_usage IS NULL';
+END IF;
+END;
+/
 
-UPDATE wvp_gb35114_cert SET purpose = 'DEVICE_IDENTITY'
- WHERE id IN (SELECT device_cert_id FROM wvp_platform WHERE device_cert_id IS NOT NULL)
-    OR id IN (SELECT cert_id FROM wvp_device WHERE cert_id IS NOT NULL);
-
-UPDATE wvp_gb35114_cert SET purpose = 'ISSUED_DEVICE'
- WHERE type = 2 AND (key_pem IS NULL OR LENGTH(key_pem) = 0);
-UPDATE wvp_gb35114_cert SET purpose = 'DEVICE_IDENTITY'
- WHERE type = 2 AND key_pem IS NOT NULL AND LENGTH(key_pem) > 0;
-UPDATE wvp_gb35114_cert SET purpose = 'TRUSTED_PLATFORM'
- WHERE type = 1 AND (key_pem IS NULL OR LENGTH(key_pem) = 0);
-UPDATE wvp_gb35114_cert SET purpose = 'SERVER_IDENTITY'
- WHERE type = 1 AND key_pem IS NOT NULL AND LENGTH(key_pem) > 0;
-UPDATE wvp_gb35114_cert SET purpose = 'ISSUED_DEVICE' WHERE purpose IS NULL;
-
-UPDATE wvp_gb35114_ca SET purpose = 'LOCAL_CA'
- WHERE key_pem IS NOT NULL AND LENGTH(key_pem) > 0;
-UPDATE wvp_gb35114_ca SET purpose = 'TRUSTED_CA'
- WHERE purpose IS NULL OR key_pem IS NULL OR LENGTH(key_pem) = 0;
-
+-- DN 兜底回填与 purpose 无关，可无条件执行
 UPDATE wvp_gb35114_cert SET subject_dn = 'CN=' || subject_cn WHERE subject_dn IS NULL;
 
--- 回填密钥用途：存量证书签出时未写入该扩展，此处仅作为展示值，不影响已签发证书
-UPDATE wvp_gb35114_cert SET key_usage = 'digitalSignature' WHERE key_usage IS NULL;
+/*============================================================================
+ * 合并 purpose 与整数 type 为单一 type 列。
+ *
+ * 背景：证书表曾同时存在 purpose varchar（四个字符串取值）与 type integer
+ * （1-服务器证书/2-设备证书）。后者只是前者的派生投影 —— 全代码库写入点 2 处、
+ * 读取点 0 处 —— 而且有损：SERVER_IDENTITY（本平台作 UAS）与 TRUSTED_PLATFORM
+ * （上级平台作 UAS）方向相反，却同落成 1。现在一个概念一个名字。
+ *
+ * 位置：必须排在「存量数据归类」之后 —— 那段靠整数 type（1/2）推断用途，改完名
+ * 就无从推断了；也必须排在本文件其余所有 type 引用之前。
+ *
+ * 顺序不能反：先 DROP 整数 type 腾出列名，再把 purpose 改名为 type。
+ * CA 表同属「这一行是什么」，一并对齐为 type。
+ *
+ * 幂等：仅在 purpose 还在时执行；重复跑本脚本安全。
+ * 新装库没有 purpose（建表时就是 type varchar），本段整体跳过。
+ *============================================================================*/
+DECLARE
+V_CNT INT;
+V_HAS_PURPOSE INT;
+V_HAS_TYPE INT;
+BEGIN
+SELECT COUNT(*) INTO V_HAS_PURPOSE FROM USER_TAB_COLUMNS
+ WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'PURPOSE';
+IF V_HAS_PURPOSE > 0 THEN
+    SELECT COUNT(*) INTO V_HAS_TYPE FROM USER_TAB_COLUMNS
+     WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'TYPE';
+    IF V_HAS_TYPE > 0 THEN
+        EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert DROP COLUMN type';
+    END IF;
+    EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert RENAME COLUMN purpose TO type';
+    EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert MODIFY type varchar(30) default ''ISSUED_DEVICE''';
+    EXECUTE IMMEDIATE 'COMMENT ON COLUMN wvp_gb35114_cert.type IS ''证书类型：SERVER_IDENTITY-服务端证书(本平台) / DEVICE_IDENTITY-客户端证书(本平台) / ISSUED_DEVICE-客户端证书(下级设备) / TRUSTED_PLATFORM-服务端证书(上级平台)''';
+
+    -- 索引名里带 purpose，改列名不会改索引名，重建为与新列名一致的名字
+    SELECT COUNT(*) INTO V_CNT FROM SYSOBJECTS WHERE NAME = 'IDX_GB35114_CERT_PURPOSE' AND TYPE$ = 'SCHOBJ';
+    IF V_CNT > 0 THEN
+        EXECUTE IMMEDIATE 'DROP INDEX idx_gb35114_cert_purpose';
+    END IF;
+    SELECT COUNT(*) INTO V_CNT FROM SYSOBJECTS WHERE NAME = 'IDX_GB35114_CERT_TYPE' AND TYPE$ = 'SCHOBJ';
+    IF V_CNT = 0 THEN
+        EXECUTE IMMEDIATE 'CREATE INDEX idx_gb35114_cert_type ON wvp_gb35114_cert (type, gb_id)';
+    END IF;
+END IF;
+
+SELECT COUNT(*) INTO V_HAS_PURPOSE FROM USER_TAB_COLUMNS
+ WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'PURPOSE';
+SELECT COUNT(*) INTO V_HAS_TYPE FROM USER_TAB_COLUMNS
+ WHERE TABLE_NAME = 'WVP_GB35114_CA' AND COLUMN_NAME = 'TYPE';
+IF V_HAS_PURPOSE > 0 AND V_HAS_TYPE = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca RENAME COLUMN purpose TO type';
+    EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_ca MODIFY type varchar(20) default ''LOCAL_CA''';
+    EXECUTE IMMEDIATE 'COMMENT ON COLUMN wvp_gb35114_ca.type IS ''类型：LOCAL_CA-本地CA(可签发，全局唯一) / TRUSTED_CA-受信任的CA(仅公钥，可重复导入)''';
+END IF;
+END;
+/
 
 
 /*============================================================================
@@ -365,11 +546,6 @@ END IF;
 END;
 /
 
--- 核对：当前服务端证书（按 id 倒序，第一条未吊销的即为签名身份）
-SELECT id, gb_id, subject_cn, serial_number, not_after, key_fingerprint,
-       CASE WHEN key_pem IS NULL OR LENGTH(key_pem) = 0 THEN 0 ELSE 1 END AS has_key
-  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY id DESC;
-
 /*============================================================================
  * 公钥指纹：标识「同一个 SM2 签名身份」。
  *
@@ -381,23 +557,34 @@ SELECT id, gb_id, subject_cn, serial_number, not_after, key_fingerprint,
  *============================================================================*/
 DECLARE
 V_CNT INT;
+V_IDX INT;
 BEGIN
 SELECT COUNT(*) INTO V_CNT FROM USER_TAB_COLUMNS
  WHERE TABLE_NAME = 'WVP_GB35114_CERT' AND COLUMN_NAME = 'KEY_FINGERPRINT';
 IF V_CNT = 0 THEN
         EXECUTE IMMEDIATE 'ALTER TABLE wvp_gb35114_cert ADD key_fingerprint varchar(64)';
 END IF;
+
+-- 索引也判存在性，否则重跑本脚本会因索引已存在而报错。
+SELECT COUNT(*) INTO V_IDX FROM SYSOBJECTS
+ WHERE NAME = 'IDX_GB35114_CERT_FINGERPRINT' AND TYPE$ = 'SCHOBJ';
+IF V_IDX = 0 THEN
+        -- 本段排在迁移段之后，purpose 必已改名为 type，直接用 type 即可。
+        EXECUTE IMMEDIATE 'CREATE INDEX idx_gb35114_cert_fingerprint ON wvp_gb35114_cert (type, key_fingerprint)';
+END IF;
 END;
 /
 COMMENT ON COLUMN wvp_gb35114_cert.key_fingerprint IS
     '公钥指纹（SM3 十六进制）；相同表示同一个签名身份，证书可互换';
 
-CREATE INDEX idx_gb35114_cert_fingerprint ON wvp_gb35114_cert (purpose, key_fingerprint);
-
 -- 存量证书的指纹无法在 SQL 里算（需解析 DER 取 SubjectPublicKeyInfo），
--- 留空即可：新签发/新导入的证书会自动写入。核对现有服务端证书的密钥对分布：
-SELECT id, subject_cn, serial_number, ca_id, key_fingerprint
-  FROM wvp_gb35114_cert WHERE purpose = 'SERVER_IDENTITY' ORDER BY id;
+-- 留空即可：新签发/新导入的证书会自动写入。
+--
+-- 核对：当前服务端证书 —— 按 id 倒序，第一条未吊销的即为签名身份；key_fingerprint
+-- 相同的一组表示共用同一密钥对，彼此可互换。本 SELECT 必须排在上面加列之后。
+SELECT id, gb_id, subject_cn, serial_number, not_after, key_fingerprint,
+       CASE WHEN key_pem IS NULL OR LENGTH(key_pem) = 0 THEN 0 ELSE 1 END AS has_key
+  FROM wvp_gb35114_cert WHERE type = 'SERVER_IDENTITY' ORDER BY id DESC;
 
 /*============================================================================
  * 删除 CA 别名列（name）。
@@ -418,5 +605,5 @@ END;
 /
 
 -- 核对：CA 表列清单里不应再有 name
-SELECT id, purpose, subject_cn, serial_number, not_after
-  FROM wvp_gb35114_ca ORDER BY purpose, id;
+SELECT id, type, subject_cn, serial_number, not_after
+  FROM wvp_gb35114_ca ORDER BY type, id;

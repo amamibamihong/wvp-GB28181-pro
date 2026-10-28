@@ -30,24 +30,7 @@
               <el-option label="证书单向认证（GB35114）" :value="4" />
             </el-select>
             <div class="hint" style="font-size:12px;color:#909399;line-height:1.6;margin-top:4px;">
-              摄像头用证书方式接入时需选 3/4，并先在证书管理-下级客户端证书中导入该设备的证书。
-            </div>
-          </el-form-item>
-          <el-form-item v-if="isGb35114CertWay" label="服务端证书" prop="serverCertId">
-            <el-select v-model="form.serverCertId" clearable style="float: left; width: 100%"
-                       placeholder="不绑定，使用平台的服务端证书">
-              <el-option
-                v-for="item in serverCertList"
-                :key="item.id"
-                :label="`#${item.id} ${item.subjectCn || item.gbId || ''}`"
-                :value="item.id"
-              />
-            </el-select>
-            <div class="hint" style="font-size:12px;color:#909399;line-height:1.6;margin-top:4px;">
-              平台签 sign2 用的私钥必须与摄像头里导入的平台证书公钥配对，否则摄像头验签失败、
-              注册后拒绝对信令服务（表现为目录查询 403、通道同步不上）。<br />
-              摄像头只信任某一张特定证书时，在此绑定它；留空则使用「证书管理-本地服务端证书」
-              中的那张（该用途后端只允许存在一张，不存在选择歧义）。
+              摄像头用证书方式接入时需选 3/4，并先在证书管理-「下级接入 · 客户端证书（下级设备）」中导入该设备的证书。
             </div>
           </el-form-item>
           <el-form-item label="收流IP" prop="sdpIp">
@@ -97,7 +80,6 @@
 
 <script>
 import elDragDialog from '@/directive/el-drag-dialog'
-import { listCert, PURPOSE_SERVER_IDENTITY } from '@/api/gb35114'
 
 export default {
   name: 'DeviceEdit',
@@ -110,18 +92,11 @@ export default {
       isLoging: false,
       hostNames: [],
       mediaServerList: [], // 滅体节点列表
-      serverCertList: [], // 本地服务端证书（供绑定）
       form: {},
       isEdit: false,
       rules: {
         deviceId: [{ required: true, message: '请输入设备编号', trigger: 'blur' }]
       }
-    }
-  },
-  computed: {
-    /** 仅证书注册方式（3/4）才需要选择服务端证书。 */
-    isGb35114CertWay() {
-      return this.form.registerWay === 3 || this.form.registerWay === 4
     }
   },
   created() {},
@@ -139,21 +114,6 @@ export default {
         this.form = row
       }
       this.getMediaServerList()
-      this.getServerCertList()
-    },
-    /**
-     * 可绑定的服务端证书：仅「本地服务端证书」，且必须已签发、持有私钥、未吊销。
-     *
-     * <p>不过滤已过期的：签名身份是<b>密钥对</b>而非证书，同一密钥对下多张有效期不同的
-     * 证书对设备完全等价（设备只存公钥）。绑定其中已过期的一张后，平台会自动改用同组
-     * 还有效的兄弟证书，设备无感。因此过期与否不构成「能不能绑」的理由。
-     */
-    getServerCertList: function() {
-      listCert(PURPOSE_SERVER_IDENTITY).then(data => {
-        this.serverCertList = (data || []).filter(
-          item => item.certPem && item.hasKey && !item.revoked
-        )
-      }).catch(() => { this.serverCertList = [] })
     },
     getMediaServerList: function() {
       this.$store.dispatch('server/getOnlineMediaServerList')

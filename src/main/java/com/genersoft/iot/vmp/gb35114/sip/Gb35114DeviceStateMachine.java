@@ -34,6 +34,20 @@ public class Gb35114DeviceStateMachine {
     private String random2;
     private byte[] vkek;
 
+    /**
+     * 上级平台证书的最后一道校验（链校验，可为空；为空表示不校验）。
+     *
+     * <p>由 {@code Gb35114SecurityService#uacStateMachine} 按
+     * {@code gb35114.verify-upstream-cert-chain} 决定是否注入 —— 状态机本身不读配置，
+     * 也不碰数据库，与 UAS 侧用 {@code certValidator} 注入吊销/过期判定的做法一致。
+     */
+    private java.util.function.Function<X509Certificate, X509Certificate> platformCertValidator;
+
+    public void setPlatformCertValidator(
+            java.util.function.Function<X509Certificate, X509Certificate> platformCertValidator) {
+        this.platformCertValidator = platformCertValidator;
+    }
+
     public Gb35114DeviceStateMachine(Gb35114CertUtil.Gb35114Identity deviceIdentity,
                                      X509Certificate platformCert,
                                      String deviceId, String serverId, String keyVersion) {
@@ -99,6 +113,11 @@ public class Gb35114DeviceStateMachine {
         if (si.mode == Mode.Bidirection) {
             if (platformCert == null) {
                 throw new Gb35114Exception("Bidirection requires platform_cert to verify sign2");
+            }
+            // 链校验（可选，由配置决定是否注入）放在验签之前：链不成立时，后面的
+            // sign2 验签即使过了也只说明「这把公钥签的」，而公钥本身的归属尚未确认。
+            if (platformCertValidator != null) {
+                platformCertValidator.apply(platformCert);
             }
             if (!si.random1.equals(random1) || !si.random2.equals(random2)
                     || !si.deviceId.equals(deviceId)) {
