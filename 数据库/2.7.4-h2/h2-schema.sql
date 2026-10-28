@@ -435,3 +435,9 @@ create table IF NOT EXISTS wvp_record_plan_item
     create_time     character varying(50),
     update_time     character varying(50)
 );
+
+create table IF NOT EXISTS tds_bypass
+(
+    dest_url character varying(255) primary key,
+    src_url  character varying(255) not null
+);

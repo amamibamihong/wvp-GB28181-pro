@@ -130,3 +130,13 @@ UPDATE wvp_user
    SET default_password = TRUE
  WHERE username = 'admin'
    AND password = '21232f297a57a5a743894a0e4a801fc3';
+
+/*
+* 旁路转推映射表：dest_url（转码后地址） -> src_url（转码前源地址）
+*/
+create table IF NOT EXISTS tds_bypass (
+        dest_url character varying(255) primary key,
+        src_url  character varying(255) not null
+);
+COMMENT ON COLUMN tds_bypass.dest_url IS '转码后地址';
+COMMENT ON COLUMN tds_bypass.src_url IS '转码前源地址';

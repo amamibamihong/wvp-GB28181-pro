@@ -47,6 +47,9 @@ create table IF NOT EXISTS wvp_device
     position_capability                 integer,
     broadcast_push_after_ack            bool    default false,
     server_id                           character varying(50),
+    register_way                        integer default 1 COMMENT '注册方式：1-摘要，3-证书双向，4-证书单向',
+    cert_id                             integer COMMENT '关联的国密证书ID（wvp_gb35114_cert.id）',
+    server_cert_id                      integer COMMENT '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用平台唯一的那张服务端证书）',
     constraint uk_device_device unique (device_id)
 );
 
@@ -249,6 +252,8 @@ create table IF NOT EXISTS wvp_platform
     auto_push_channel     bool default true,
     send_stream_ip        character varying(50),
     server_id             character varying(50),
+    device_cert_id        integer COMMENT '本平台作下级注册的设备证书ID（wvp_gb35114_cert.id）',
+    platform_cert_id      integer COMMENT '受信上级平台证书ID（wvp_gb35114_cert.id）',
     constraint uk_platform_unique_server_gb_id unique (server_gb_id)
 );
 
@@ -473,6 +478,115 @@ create table IF NOT EXISTS wvp_record_plan_item
     plan_id         int,
     create_time     character varying(50),
     update_time     character varying(50)
+);
+
+/*
+* 以下为 2.7.4 新增的表，放在升级段之前，便于新库与升级库共用同一套建表语句
+*/
+-- 交通部 JT/T 1076 终端信息
+create table IF NOT EXISTS wvp_jt_terminal (
+                                 id serial primary key COMMENT '主键ID',
+                                 phone_number character varying(50) COMMENT '终端SIM卡号',
+                                 terminal_id character varying(50) COMMENT '终端设备ID',
+                                 province_id character varying(50) COMMENT '所在省份ID',
+                                 province_text character varying(100) COMMENT '所在省份名称',
+                                 city_id character varying(50) COMMENT '所在城市ID',
+                                 city_text character varying(100) COMMENT '所在城市名称',
+                                 maker_id character varying(50) COMMENT '厂商ID',
+                                 model character varying(50) COMMENT '终端型号',
+                                 plate_color character varying(50) COMMENT '车牌颜色',
+                                 plate_no character varying(50) COMMENT '车牌号码',
+                                 longitude double precision COMMENT '经度',
+                                 latitude double precision COMMENT '纬度',
+                                 status bool default false COMMENT '在线状态',
+                                 register_time character varying(50) default null COMMENT '注册时间',
+                                 update_time character varying(50) not null COMMENT '更新时间',
+                                 create_time character varying(50) not null COMMENT '创建时间',
+                                 geo_coord_sys character varying(50) COMMENT '坐标系',
+                                 media_server_id character varying(50) default 'auto' COMMENT '媒体服务器ID',
+                                 sdp_ip character varying(50) COMMENT 'SDP IP',
+                                 constraint uk_jt_device_id_device_id unique (id, phone_number)
+);
+
+-- 交通部 JT/T 1076 通道信息
+create table IF NOT EXISTS wvp_jt_channel (
+                               id serial primary key COMMENT '主键ID',
+                               terminal_db_id integer COMMENT '所属终端记录ID',
+                               channel_id integer COMMENT '通道号',
+                               has_audio bool default false COMMENT '是否有音频',
+                               name character varying(255) COMMENT '通道名称',
+                               update_time character varying(50) not null COMMENT '更新时间',
+                               create_time character varying(50) not null COMMENT '创建时间',
+                               constraint uk_jt_channel_id_device_id unique (terminal_db_id, channel_id)
+);
+
+-- 报警信息表，表结构参考alarm类
+create table IF NOT EXISTS wvp_alarm (
+                          id serial primary key COMMENT '主键ID',
+                          channel_id integer COMMENT '关联通道的数据库id',
+                          description character varying(255) COMMENT '报警描述',
+                          snap_path character varying(255) COMMENT '报警快照路径',
+                          record_path character varying(255) COMMENT '报警录像路径',
+                          longitude double precision COMMENT '报警附带的经度',
+                          latitude double precision COMMENT '报警附带的纬度',
+                          alarm_type integer COMMENT '报警类别',
+                          alarm_time bigint COMMENT '报警时间'
+);
+
+-- GB35114 A 级国密证书管理表
+
+-- 根 CA 表
+create table IF NOT EXISTS wvp_gb35114_ca
+(
+    id                  serial primary key COMMENT '主键ID',
+    type                character varying(20) DEFAULT 'LOCAL_CA'
+                        COMMENT '类型：LOCAL_CA-本地CA(可签发，全局唯一) / TRUSTED_CA-受信任的CA(仅公钥，可重复导入)',
+    subject_cn          character varying(255) COMMENT '主题 CN',
+    subject_dn          character varying(500) COMMENT '完整主题DN（RFC2253）',
+    country             character varying(10) COMMENT '国家 C',
+    province            character varying(64) COMMENT '省份 ST',
+    locality            character varying(64) COMMENT '城市 L',
+    organization        character varying(255) COMMENT '组织 O',
+    organizational_unit character varying(255) COMMENT '组织单位 OU',
+    serial_number       character varying(100) COMMENT '序列号',
+    cert_pem            text COMMENT '证书 PEM',
+    key_pem             text COMMENT '私钥 PEM（对称加密存储）',
+    not_before          character varying(50) COMMENT '生效时间',
+    not_after           character varying(50) COMMENT '失效时间',
+    remark              character varying(500) COMMENT '备注',
+    create_time         character varying(50) COMMENT '创建时间'
+);
+
+-- 证书表
+create table IF NOT EXISTS wvp_gb35114_cert
+(
+    id                  serial primary key COMMENT '主键ID',
+    type                character varying(30) DEFAULT 'ISSUED_DEVICE'
+                        COMMENT '证书类型：SERVER_IDENTITY-服务端证书(本平台) / DEVICE_IDENTITY-客户端证书(本平台) / ISSUED_DEVICE-客户端证书(下级设备) / TRUSTED_PLATFORM-服务端证书(上级平台)',
+    gb_id               character varying(50) COMMENT '关联国标 ID',
+    subject_cn          character varying(255) COMMENT '主题 CN',
+    subject_dn          character varying(500) COMMENT '完整主题DN（RFC2253）',
+    module_id           character varying(64) COMMENT '密码模块 ID（附录B，22位十进制）；空表示无密码模块',
+    country             character varying(10) COMMENT '国家 C',
+    province            character varying(64) COMMENT '省份 ST',
+    locality            character varying(64) COMMENT '城市 L',
+    organization        character varying(255) COMMENT '组织 O',
+    organizational_unit character varying(255) COMMENT '组织单位 OU',
+    serial_number       character varying(100) COMMENT '序列号',
+    ca_id               integer COMMENT '签发 CA 的 ID，null 表示自签',
+    cert_pem            text COMMENT '证书 PEM',
+    key_pem             text COMMENT '私钥 PEM（对称加密存储）',
+    csr_pem             text COMMENT '待签发记录的CSR PEM（私钥与之同记录）',
+    not_before          character varying(50) COMMENT '生效时间',
+    not_after           character varying(50) COMMENT '失效时间',
+    validity_days       integer COMMENT '签发时的有效期天数快照',
+    key_usage           character varying(200) COMMENT '密钥用途扩展，如 digitalSignature、keyCertSign|cRLSign',
+    revoked             bool default false COMMENT '是否已吊销',
+    key_fingerprint     character varying(64) COMMENT '公钥指纹（SM3 十六进制）；相同表示同一个签名身份，证书可互换',
+    remark              character varying(500) COMMENT '备注',
+    create_time         character varying(50) COMMENT '创建时间',
+    key idx_gb35114_cert_type (type, gb_id),
+    key idx_gb35114_cert_fingerprint (type, key_fingerprint)
 );
 
 /*
@@ -768,3 +882,287 @@ DELIMITER ;
 
 
 
+
+-- 旁路转推映射表：dest_url（转码后地址） -> src_url（转码前源地址）
+create table IF NOT EXISTS tds_bypass
+(
+    dest_url character varying(255) primary key COMMENT '转码后地址',
+    src_url  character varying(255) not null COMMENT '转码前源地址'
+);
+
+
+/*
+* ===== 2.7.4 升级段：以下与 数据库/2.7.4/更新-mysql-2.7.4.sql 一致，在已有库上幂等补齐 =====
+*/
+/*
+* 20250708
+*/
+DROP PROCEDURE IF EXISTS `wvp_20250708`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_20250708`()
+BEGIN
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_media_server' and column_name = 'jtt_proxy_port')
+    THEN
+        ALTER TABLE wvp_media_server ADD jtt_proxy_port  integer;
+    END IF;
+END; //
+DELIMITER ;
+call wvp_20250708();
+DROP PROCEDURE wvp_20250708;
+
+/*
+* 20250917
+*/
+DROP PROCEDURE IF EXISTS `wvp_20250917`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_20250917`()
+BEGIN
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_media_server' and column_name = 'mp4_port')
+    THEN
+        ALTER TABLE wvp_media_server ADD mp4_port integer;
+    END IF;
+
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_media_server' and column_name = 'mp4_ssl_port')
+    THEN
+        ALTER TABLE wvp_media_server ADD mp4_ssl_port integer;
+    END IF;
+END; //
+DELIMITER ;
+call wvp_20250917();
+DROP PROCEDURE wvp_20250917;
+
+/*
+* 20250924
+*/
+DROP PROCEDURE IF EXISTS `wvp_20250924`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_20250924`()
+BEGIN
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_channel' and column_name = 'enable_broadcast')
+    THEN
+        ALTER TABLE wvp_device_channel ADD enable_broadcast integer default 0;
+    END IF;
+
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                       WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_channel' and column_name = 'map_level')
+    THEN
+        ALTER TABLE wvp_device_channel ADD map_level integer default 0;
+    END IF;
+
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                       WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_common_group' and column_name = 'alias')
+    THEN
+        ALTER TABLE wvp_common_group ADD alias varchar(255) default null;
+    END IF;
+END; //
+DELIMITER ;
+call wvp_20250924();
+DROP PROCEDURE wvp_20250924;
+
+
+/*
+* 20251027
+*/
+DROP PROCEDURE IF EXISTS `wvp_20251027`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_20251027`()
+BEGIN
+    IF EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_stream_proxy' and column_name = 'enable_remove_none_reader')
+    THEN
+        ALTER TABLE wvp_stream_proxy DROP enable_remove_none_reader;
+    END IF;
+END; //
+DELIMITER ;
+call wvp_20251027();
+DROP PROCEDURE wvp_20251027;
+
+/*
+* 20251101
+*/
+DROP PROCEDURE IF EXISTS `wvp_20251101`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_20251101`()
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.STATISTICS
+               WHERE TABLE_SCHEMA = (SELECT DATABASE())
+                 AND TABLE_NAME = 'wvp_media_server'
+                 AND INDEX_NAME = 'uk_media_server_unique_ip_http_port')
+    THEN
+        drop index uk_media_server_unique_ip_http_port on wvp_media_server;
+    END IF;
+END; //
+DELIMITER ;
+call wvp_20251101();
+DROP PROCEDURE wvp_20251101;
+
+/*
+* 202601025
+*/
+DROP PROCEDURE IF EXISTS `wvp_202601025`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_202601025`()
+BEGIN
+    IF EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device' and column_name = 'register_time')
+    THEN
+        ALTER TABLE wvp_device DROP register_time;
+    END IF;
+    IF EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device' and column_name = 'keepalive_time')
+    THEN
+        ALTER TABLE wvp_device DROP keepalive_time;
+    END IF;
+END; //
+DELIMITER ;
+call wvp_202601025();
+DROP PROCEDURE wvp_202601025;
+
+
+/*
+* 20260417 将wvp_device_mobile_position从专属国标的位置记录表，改为通用通道共用的位置记录表
+*/
+DROP PROCEDURE IF EXISTS `wvp_20260417`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_20260417`()
+BEGIN
+ IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_mobile_position' and column_name = 'timestamp')
+    THEN
+    ALTER TABLE wvp_device_mobile_position ADD timestamp BIGINT COMMENT '上报时间';
+END IF;
+IF EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_mobile_position' and column_name = 'time')
+    THEN
+    UPDATE wvp_device_mobile_position SET timestamp = UNIX_TIMESTAMP(time) * 1000;
+    ALTER TABLE wvp_device_mobile_position DROP time;
+END IF;
+IF EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_mobile_position' and column_name = 'device_id')
+    THEN
+    ALTER TABLE wvp_device_mobile_position DROP device_id;
+END IF;
+IF EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_mobile_position' and column_name = 'device_name')
+    THEN
+    ALTER TABLE wvp_device_mobile_position DROP device_name;
+END IF;
+IF EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_mobile_position' and column_name = 'report_source')
+    THEN
+ALTER TABLE wvp_device_mobile_position DROP report_source;
+END IF;
+-- 修改表名
+IF EXISTS (SELECT table_name FROM information_schema.tables
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_device_mobile_position')
+    THEN
+ALTER TABLE wvp_device_mobile_position RENAME TO wvp_mobile_position;
+END IF;
+
+END; //
+DELIMITER ;
+call wvp_20260417();
+DROP PROCEDURE wvp_20260417;
+
+/*
+* 20260521 添加wvp_device_channel唯一约束，防止通道重复写入
+*/
+DROP PROCEDURE IF EXISTS `wvp_20260521`;
+DELIMITER //
+CREATE PROCEDURE `wvp_20260521`()
+BEGIN
+    IF NOT EXISTS (SELECT 1
+                   FROM information_schema.STATISTICS
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE())
+                     AND TABLE_NAME = 'wvp_device_channel'
+                     AND INDEX_NAME = 'uk_device_channel_source')
+    THEN
+        -- 用 GROUP BY + LEFT JOIN 替代自连接 DELETE
+        DELETE t1
+        FROM wvp_device_channel t1
+                 LEFT JOIN (SELECT MAX(id) as id
+                            FROM wvp_device_channel
+                            GROUP BY data_device_id, device_id) t2 ON t1.id = t2.id
+        WHERE t2.id IS NULL;
+
+ALTER TABLE wvp_device_channel
+    ADD UNIQUE INDEX uk_device_channel_source (data_device_id, device_id);
+END IF;
+END; //
+DELIMITER ;
+call wvp_20260521();
+DROP PROCEDURE wvp_20260521;
+
+
+
+
+
+
+
+/*
+* 20260606 添加用户默认密码标记字段（默认密码强制修改）
+*/
+DROP PROCEDURE IF EXISTS `wvp_20260606`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_20260606`()
+BEGIN
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and  table_name = 'wvp_user' and column_name = 'default_password')
+    THEN
+        ALTER TABLE wvp_user ADD default_password bool default false COMMENT '是否使用默认密码';
+    END IF;
+
+    -- 仅当 admin 的密码仍是默认密码时才标记 default_password=TRUE，已改过密码的不强制
+    UPDATE wvp_user
+       SET default_password = TRUE
+     WHERE username = 'admin'
+       AND password = '21232f297a57a5a743894a0e4a801fc3';
+END; //
+DELIMITER ;
+call wvp_20260606();
+DROP PROCEDURE wvp_20260606;
+
+/*
+* GB35114：为已有库补齐设备/平台的证书关联列（表本身由上面的 create table IF NOT EXISTS 建好）
+*/
+DROP PROCEDURE IF EXISTS `wvp_gb35114_cols`;
+DELIMITER //  -- 重定义分隔符避免分号冲突
+CREATE PROCEDURE `wvp_gb35114_cols`()
+BEGIN
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and table_name = 'wvp_device' and column_name = 'register_way')
+    THEN
+        ALTER TABLE wvp_device ADD register_way integer default 1 COMMENT '注册方式：1-摘要，3-证书双向，4-证书单向';
+    END IF;
+
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and table_name = 'wvp_device' and column_name = 'cert_id')
+    THEN
+        ALTER TABLE wvp_device ADD cert_id integer COMMENT '关联的国密证书ID（wvp_gb35114_cert.id）';
+    END IF;
+
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and table_name = 'wvp_device' and column_name = 'server_cert_id')
+    THEN
+        ALTER TABLE wvp_device ADD server_cert_id integer COMMENT '该设备信任的服务器证书ID（wvp_gb35114_cert.id）';
+    END IF;
+
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and table_name = 'wvp_platform' and column_name = 'device_cert_id')
+    THEN
+        ALTER TABLE wvp_platform ADD device_cert_id integer COMMENT '本平台作下级注册的设备证书ID（wvp_gb35114_cert.id）';
+    END IF;
+
+    IF NOT EXISTS (SELECT column_name FROM information_schema.columns
+                   WHERE TABLE_SCHEMA = (SELECT DATABASE()) and table_name = 'wvp_platform' and column_name = 'platform_cert_id')
+    THEN
+        ALTER TABLE wvp_platform ADD platform_cert_id integer COMMENT '受信上级平台证书ID（wvp_gb35114_cert.id）';
+    END IF;
+END; //
+DELIMITER ;
+call wvp_gb35114_cols();
+DROP PROCEDURE wvp_gb35114_cols;

@@ -16,8 +16,9 @@ services:
       - --default-time-zone=+8:00
     volumes:
       - ./mysql/data:/var/lib/mysql
+      # 仅挂全量初始化脚本（已含 GB35114 两表与 tds_bypass）。
+      # 更新脚本只在老库升级时手工执行，不放进 initdb.d。
       - ./mysql/01-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-      - ./mysql/02-gb35114.sql:/docker-entrypoint-initdb.d/02-gb35114.sql:ro
     healthcheck:
       # 用 CMD-SHELL 而非 CMD：CMD 形式不做变量展开，$$ 由 compose 转义后交给容器内 shell
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]

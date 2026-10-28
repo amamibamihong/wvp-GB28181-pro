@@ -465,3 +465,10 @@ create table IF NOT EXISTS wvp_record_plan_item
     update_time     character varying(50)
 );
 
+/*旁路转推映射表：dest_url（转码后地址） -> src_url（转码前源地址）*/
+drop table IF EXISTS tds_bypass;
+create table IF NOT EXISTS tds_bypass
+(
+    dest_url character varying(255) primary key,
+    src_url  character varying(255) not null
+);
