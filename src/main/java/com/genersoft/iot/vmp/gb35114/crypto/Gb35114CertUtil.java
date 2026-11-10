@@ -566,6 +566,9 @@ public final class Gb35114CertUtil {
 
     /** 解析 CSR PEM。 */
     public static PKCS10CertificationRequest parseCsr(String csrPem) throws Exception {
+        if (csrPem == null || csrPem.isEmpty()) {
+            throw new IllegalArgumentException("CSR 内容为空，无法解析");
+        }
         try (PEMParser parser = new PEMParser(new StringReader(csrPem))) {
             Object obj = parser.readObject();
             if (obj instanceof PKCS10CertificationRequest) {
@@ -755,6 +758,11 @@ public final class Gb35114CertUtil {
 
     /** 从 PEM 加载证书（不含私钥）。 */
     public static X509Certificate loadCertificate(String pem) throws Exception {
+        // 空 PEM 直接给出可读原因：交给 StringReader 会抛
+        // 「Cannot invoke "String.length()" because "s" is null」，看不出是「没有证书内容」。
+        if (pem == null || pem.isEmpty()) {
+            throw new IllegalArgumentException("证书内容为空，无法解析");
+        }
         try (PEMParser parser = new PEMParser(new StringReader(pem))) {
             Object obj = parser.readObject();
             if (obj instanceof X509CertificateHolder) {
@@ -775,6 +783,9 @@ public final class Gb35114CertUtil {
 
     /** 加载私钥（PKCS#8 或 SEC1 或加密 PKCS#8）。 */
     public static PrivateKey loadPrivateKey(String keyPem) throws Exception {
+        if (keyPem == null || keyPem.isEmpty()) {
+            throw new IllegalArgumentException("私钥内容为空，无法解析");
+        }
         try (PEMParser parser = new PEMParser(new StringReader(keyPem))) {
             Object obj = parser.readObject();
             JcaPEMKeyConverter converter = new JcaPEMKeyConverter()

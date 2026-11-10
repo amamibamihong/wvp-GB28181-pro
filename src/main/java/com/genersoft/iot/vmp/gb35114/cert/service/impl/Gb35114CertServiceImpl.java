@@ -899,11 +899,19 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
             return null;
         }
         // 吊销的绝不参与（列表按 id 倒序，同一 gbId 有多张时取最新的那张）
+        // 待签发（只有 CSR 与私钥、certPem 为空）的同样不参与：它还不是一张证书，
+        // 既不能用于签名也不能用于验签。放进来会让调用方拿到一条「有私钥但没证书」的记录，
+        // 随后在 loadIdentity 里以 StringReader(null) 的 NPE 形式炸掉，报错信息完全指不到
+        // 「证书还没签发」这个真实原因。
         List<Gb35114Cert> candidates = new java.util.ArrayList<>();
         for (Gb35114Cert cert : all) {
-            if (!Boolean.TRUE.equals(cert.getRevoked())) {
-                candidates.add(cert);
+            if (Boolean.TRUE.equals(cert.getRevoked())) {
+                continue;
             }
+            if (cert.getCertPem() == null || cert.getCertPem().isEmpty()) {
+                continue;
+            }
+            candidates.add(cert);
         }
         if (candidates.isEmpty()) {
             return null;
@@ -1004,6 +1012,12 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
         if (cert == null) {
             return null;
         }
+        // 与 loadIdentity 同理：待签发记录没有证书内容，先给出可读的原因，
+        // 而不是让 null 在 loadCertificate 里变成 StringReader(null) 的 NPE。
+        if (cert.getCertPem() == null || cert.getCertPem().isEmpty()) {
+            throw new IllegalStateException("证书 #" + id + " 类型为 " + cert.getType()
+                    + " 尚未签发（无证书内容），不能使用；请先完成签发或回填证书");
+        }
         try {
             return Gb35114CertUtil.loadCertificate(cert.getCertPem());
         } catch (Exception e) {
@@ -1033,6 +1047,14 @@ public class Gb35114CertServiceImpl implements IGb35114CertService {
         if (cert.getKeyPem() == null || cert.getKeyPem().isEmpty()) {
             throw new IllegalStateException("证书 #" + id + " 类型为 " + cert.getType()
                     + "，本平台不持有私钥，不能用于本平台签名");
+        }
+        // 待签发记录（只有 CSR 与私钥，证书内容为空）不能用于签名。不在这里拦的话，
+        // null 会一路传到 Gb35114CertUtil.loadCertificate 的 new StringReader(pem)，
+        // 报成「加载身份失败: Cannot invoke "String.length()" because "s" is null」，
+        // 完全看不出真实原因是「证书还没签发」。
+        if (cert.getCertPem() == null || cert.getCertPem().isEmpty()) {
+            throw new IllegalStateException("证书 #" + id + " 类型为 " + cert.getType()
+                    + " 尚未签发（无证书内容），不能用于本平台签名；请先完成签发或回填证书");
         }
         String keyPem = Gb35114KeyProtector.decrypt(config.getKeyEncryptPassword(), cert.getKeyPem());
         try {
