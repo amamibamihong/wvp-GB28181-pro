@@ -35,6 +35,9 @@ create table IF NOT EXISTS wvp_device
     position_capability                 integer,
     broadcast_push_after_ack            bool    default false,
     server_id                           character varying(50),
+    register_way                        integer default 1,
+    cert_id                             integer,
+    server_cert_id                      integer,
     constraint uk_device_device unique (device_id)
 );
 COMMENT ON TABLE wvp_device IS '存储国标设备的基础信息及在线状态';
@@ -422,6 +425,8 @@ create table IF NOT EXISTS wvp_platform
     auto_push_channel     bool default true,
     send_stream_ip        character varying(50),
     server_id             character varying(50),
+    device_cert_id        integer,
+    platform_cert_id      integer,
     constraint uk_platform_unique_server_gb_id unique (server_gb_id)
 );
 COMMENT ON TABLE wvp_platform IS '上级国标平台注册信息';
@@ -940,3 +945,105 @@ COMMENT ON COLUMN wvp_alarm.alarm_type IS '报警类别';
 COMMENT ON COLUMN wvp_alarm.alarm_time IS '报警时间';
 
 
+
+-- GB35114 A 级国密证书管理表
+
+-- 根 CA 表
+create table IF NOT EXISTS wvp_gb35114_ca
+(
+    id                  serial primary key,
+    type                character varying(20) DEFAULT 'LOCAL_CA',
+    subject_cn          character varying(255),
+    subject_dn          character varying(500),
+    country             character varying(10),
+    province            character varying(64),
+    locality            character varying(64),
+    organization        character varying(255),
+    organizational_unit character varying(255),
+    serial_number       character varying(100),
+    cert_pem            text,
+    key_pem             text,
+    not_before          character varying(50),
+    not_after           character varying(50),
+    remark              character varying(500),
+    create_time         character varying(50)
+);
+COMMENT ON COLUMN wvp_gb35114_ca.id IS '主键ID';
+COMMENT ON COLUMN wvp_gb35114_ca.type IS '类型：LOCAL_CA-本地CA(可签发，全局唯一) / TRUSTED_CA-受信任的CA(仅公钥，可重复导入)';
+COMMENT ON COLUMN wvp_gb35114_ca.subject_cn IS '主题 CN';
+COMMENT ON COLUMN wvp_gb35114_ca.subject_dn IS '完整主题DN（RFC2253）';
+COMMENT ON COLUMN wvp_gb35114_ca.country IS '国家 C';
+COMMENT ON COLUMN wvp_gb35114_ca.province IS '省份 ST';
+COMMENT ON COLUMN wvp_gb35114_ca.locality IS '城市 L';
+COMMENT ON COLUMN wvp_gb35114_ca.organization IS '组织 O';
+COMMENT ON COLUMN wvp_gb35114_ca.organizational_unit IS '组织单位 OU';
+COMMENT ON COLUMN wvp_gb35114_ca.serial_number IS '序列号';
+COMMENT ON COLUMN wvp_gb35114_ca.cert_pem IS '证书 PEM';
+COMMENT ON COLUMN wvp_gb35114_ca.key_pem IS '私钥 PEM（对称加密存储）';
+COMMENT ON COLUMN wvp_gb35114_ca.not_before IS '生效时间';
+COMMENT ON COLUMN wvp_gb35114_ca.not_after IS '失效时间';
+COMMENT ON COLUMN wvp_gb35114_ca.remark IS '备注';
+COMMENT ON COLUMN wvp_gb35114_ca.create_time IS '创建时间';
+
+-- 证书表
+create table IF NOT EXISTS wvp_gb35114_cert
+(
+    id                  serial primary key,
+    type                character varying(30) DEFAULT 'ISSUED_DEVICE',
+    gb_id               character varying(50),
+    subject_cn          character varying(255),
+    subject_dn          character varying(500),
+    module_id           character varying(64),
+    country             character varying(10),
+    province            character varying(64),
+    locality            character varying(64),
+    organization        character varying(255),
+    organizational_unit character varying(255),
+    serial_number       character varying(100),
+    ca_id               integer,
+    cert_pem            text,
+    key_pem             text,
+    csr_pem             text,
+    not_before          character varying(50),
+    not_after           character varying(50),
+    validity_days       integer,
+    key_usage           character varying(200),
+    revoked             bool default false,
+    key_fingerprint     character varying(64),
+    remark              character varying(500),
+    create_time         character varying(50)
+);
+COMMENT ON COLUMN wvp_gb35114_cert.id IS '主键ID';
+COMMENT ON COLUMN wvp_gb35114_cert.type IS '证书类型：SERVER_IDENTITY-服务端证书(本平台) / DEVICE_IDENTITY-客户端证书(本平台) / ISSUED_DEVICE-客户端证书(下级设备) / TRUSTED_PLATFORM-服务端证书(上级平台)';
+COMMENT ON COLUMN wvp_gb35114_cert.gb_id IS '关联国标 ID';
+COMMENT ON COLUMN wvp_gb35114_cert.subject_cn IS '主题 CN';
+COMMENT ON COLUMN wvp_gb35114_cert.subject_dn IS '完整主题DN（RFC2253）';
+COMMENT ON COLUMN wvp_gb35114_cert.module_id IS '密码模块 ID（附录B，22位十进制）；空表示无密码模块';
+COMMENT ON COLUMN wvp_gb35114_cert.country IS '国家 C';
+COMMENT ON COLUMN wvp_gb35114_cert.province IS '省份 ST';
+COMMENT ON COLUMN wvp_gb35114_cert.locality IS '城市 L';
+COMMENT ON COLUMN wvp_gb35114_cert.organization IS '组织 O';
+COMMENT ON COLUMN wvp_gb35114_cert.organizational_unit IS '组织单位 OU';
+COMMENT ON COLUMN wvp_gb35114_cert.serial_number IS '序列号';
+COMMENT ON COLUMN wvp_gb35114_cert.ca_id IS '签发 CA 的 ID，null 表示自签';
+COMMENT ON COLUMN wvp_gb35114_cert.cert_pem IS '证书 PEM';
+COMMENT ON COLUMN wvp_gb35114_cert.key_pem IS '私钥 PEM（对称加密存储）';
+COMMENT ON COLUMN wvp_gb35114_cert.csr_pem IS '待签发记录的CSR PEM（私钥与之同记录）';
+COMMENT ON COLUMN wvp_gb35114_cert.not_before IS '生效时间';
+COMMENT ON COLUMN wvp_gb35114_cert.not_after IS '失效时间';
+COMMENT ON COLUMN wvp_gb35114_cert.validity_days IS '签发时的有效期天数快照';
+COMMENT ON COLUMN wvp_gb35114_cert.key_usage IS '密钥用途扩展，如 digitalSignature、keyCertSign|cRLSign';
+COMMENT ON COLUMN wvp_gb35114_cert.revoked IS '是否已吊销';
+COMMENT ON COLUMN wvp_gb35114_cert.key_fingerprint IS '公钥指纹（SM3 十六进制）；相同表示同一个签名身份，证书可互换';
+COMMENT ON COLUMN wvp_gb35114_cert.remark IS '备注';
+COMMENT ON COLUMN wvp_gb35114_cert.create_time IS '创建时间';
+create index IF NOT EXISTS idx_gb35114_cert_type on wvp_gb35114_cert (type, gb_id);
+create index IF NOT EXISTS idx_gb35114_cert_fingerprint on wvp_gb35114_cert (type, key_fingerprint);
+
+-- 旁路转推映射表：dest_url（转码后地址） -> src_url（转码前源地址）
+create table IF NOT EXISTS tds_bypass (
+        dest_url character varying(255) primary key,
+        src_url  character varying(255) not null
+);
+COMMENT ON COLUMN tds_bypass.dest_url IS '转码后地址';
+COMMENT ON COLUMN tds_bypass.src_url IS '转码前源地址';

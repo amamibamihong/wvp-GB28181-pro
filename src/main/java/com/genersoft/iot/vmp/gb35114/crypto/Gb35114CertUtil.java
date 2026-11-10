@@ -1,5 +1,6 @@
 package com.genersoft.iot.vmp.gb35114.crypto;
 
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.gm.GMNamedCurves;
 import org.bouncycastle.asn1.gm.GMObjectIdentifiers;
 import org.bouncycastle.asn1.x9.X9ECParameters;
@@ -7,6 +8,7 @@ import org.bouncycastle.asn1.x500.RDN;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x500.style.BCStyle;
 import org.bouncycastle.asn1.x500.style.IETFUtils;
+import org.bouncycastle.asn1.x509.BasicConstraints;
 import org.bouncycastle.asn1.x509.Extension;
 import org.bouncycastle.asn1.x509.KeyUsage;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
@@ -95,7 +97,7 @@ public final class Gb35114CertUtil {
      * 或「显式曲线参数」两种形式（长度 91 vs 311 字节），整体编码做摘要会得出不同指纹，
      * 无法判断两张证书是否同一个身份。取点编码则与编码形式无关。
      *
-     * <p>用途是判定两张证书是否<b>同一个签名身份</b>——公钥相同则指纹相同。设备侧只
+     * <p>类型是判定两张证书是否<b>同一个签名身份</b>——公钥相同则指纹相同。设备侧只
      * 保存一个平台公钥，因此同指纹的证书彼此可互换：设备导入其中任一张，平台用同组
      * 内任一张的私钥签名都能被验过。这也是「证书轮换不打断已配置设备」的依据。
      */
@@ -140,7 +142,7 @@ public final class Gb35114CertUtil {
      * 用<b>已有私钥</b>生成 CSR：公钥与私钥均取自调用方，不生成新密钥对。
      *
      * <p>用于让「向上级申请的客户端证书」与已有身份共用同一密钥对，或对同一身份
-     * 重新提交请求。标准未禁止同一公钥申请不同用途的证书，但服务端/客户端两个
+     * 重新提交请求。标准未禁止同一公钥申请不同类型的证书，但服务端/客户端两个
      * 信任方向相反，是否共用应由使用方按自己的安全策略决定。
      *
      * @param subject     证书主题
@@ -214,15 +216,131 @@ public final class Gb35114CertUtil {
         return new X500Name(rdns.toArray(new RDN[0]));
     }
 
-    private static void addRdn(List<RDN> rdns, org.bouncycastle.asn1.ASN1ObjectIdentifier oid, String value) {
+    private static void addRdn(List<RDN> rdns, ASN1ObjectIdentifier oid, String value) {
         if (value != null && !value.trim().isEmpty()) {
             rdns.add(new RDN(oid, BCStyle.INSTANCE.stringToValue(oid, value.trim())));
+        }
+    }
+
+    /**
+     * 主题 DN 的分段解析结果，字段与证书档案的各列一一对应，缺失段为 {@code null}。
+     */
+    public record DnParts(String country, String province, String locality,
+                          String organization, String organizationalUnit, String commonName) {
+    }
+
+    /**
+     * 从证书主题 DN 解析出各段（C/ST/L/O/OU/CN）。
+     *
+     * <p>与 {@link #buildSubject} 互逆。用它把「证书里真实写着的 DN」拆回各列，
+     * 而不是采信调用方传进来的表单值 —— 表单值可能带首尾空格、大小写不同，或者
+     * 干脆是空的（导入路径就没有这些输入）。只要列取自证书本身，列与
+     * {@code subject_dn} 就永远一致，不会出现「DN 里有 C=CN、country 列却是 NULL」。
+     *
+     * <p>同一属性出现多次时取第一个，够用于展示与回填。
+     */
+    public static DnParts parseSubject(X509Certificate cert) {
+        X500Name name = new X500Name(cert.getSubjectX500Principal().getName());
+        return new DnParts(
+                firstRdn(name, BCStyle.C), firstRdn(name, BCStyle.ST), firstRdn(name, BCStyle.L),
+                firstRdn(name, BCStyle.O), firstRdn(name, BCStyle.OU), firstRdn(name, BCStyle.CN));
+    }
+
+    /** 取某个属性的首个取值，没有则返回 null。 */
+    private static String firstRdn(X500Name name, ASN1ObjectIdentifier oid) {
+        RDN[] rdns = name.getRDNs(oid);
+        if (rdns == null || rdns.length == 0) {
+            return null;
+        }
+        try {
+            return IETFUtils.valueToString(rdns[0].getFirst().getValue());
+        } catch (Exception e) {
+            return null;
         }
     }
 
     /** 取证书主题 DN（RFC2253 形式）。 */
     public static String subjectDn(X509Certificate cert) {
         return cert.getSubjectX500Principal().getName();
+    }
+
+    /**
+     * GB 35114—2017 附录 A 表 A.1 第 6 项「设备标识（CN）」的解析结果。
+     *
+     * <p>标准规定的 CN 格式为「<b>设备 ID_密码模块 ID</b>」，以「_」分隔，
+     * 某个 ID 为空时该位置写 {@code NULL}。密码模块 ID 是 22 位十进制编码
+     * （附录 B：产品型号 4 + 类型 2 + 生产日期 8 + 批次 3 + 序号 5）。
+     */
+    public record DeviceIds(String deviceId, String moduleId) {
+    }
+
+    /** 密码模块 ID 的位数（GB 35114—2017 附录 B：五码段共 22 位十进制数字）。 */
+    public static final int MODULE_ID_LENGTH = 22;
+
+    /**
+     * 无密码模块时 CN 里密码模块 ID 位置的默认占位：22 个 0。
+     *
+     * <p>标准允许该 ID 为空时写 {@code NULL}；本平台默认填全 0 而非 {@code NULL}，
+     * 是因为「长度对但取值为 0」比「写 NULL」更能通过「码段长度符合附录 B」的形式核对，
+     * 同时明确表达「本平台无硬件密码模块」这一事实。用户可在表单里改成真实编码。
+     */
+    public static final String MODULE_ID_PLACEHOLDER = "0".repeat(MODULE_ID_LENGTH);
+
+    /**
+     * 从设备证书 CN 解析出设备 ID 与密码模块 ID。
+     *
+     * <p>兼容两种形态：
+     * <ul>
+     *   <li>标准格式 {@code 设备ID_密码模块ID} —— 拆成两段；</li>
+     *   <li>只有设备 ID（本平台历史默认值，或平台证书）—— 密码模块 ID 为 {@code null}。</li>
+     * </ul>
+     * 密码模块 ID 位置写 {@code NULL}（标准规定的空值写法）时同样返回 {@code null}。
+     *
+     * @return 解析结果；{@code cn} 为空时返回 {@code null}
+     */
+    public static DeviceIds parseDeviceIds(String cn) {
+        if (cn == null || cn.trim().isEmpty()) {
+            return null;
+        }
+        String value = cn.trim();
+        int sep = value.indexOf('_');
+        if (sep < 0) {
+            // 无分隔符：只有设备 ID（或平台证书的任意 CN）
+            return new DeviceIds(value, null);
+        }
+        String deviceId = value.substring(0, sep).trim();
+        String moduleId = value.substring(sep + 1).trim();
+        if (moduleId.isEmpty() || "NULL".equalsIgnoreCase(moduleId)) {
+            moduleId = null;
+        }
+        return new DeviceIds(deviceId.isEmpty() ? null : deviceId, moduleId);
+    }
+
+    /**
+     * 按附录 A 表 A.1 拼装设备证书的 CN：{@code 设备ID_密码模块ID}。
+     *
+     * <p>任一段为空时写 {@code NULL}（标准规定的空值写法）。
+     */
+    public static String buildDeviceCn(String deviceId, String moduleId) {
+        String d = (deviceId == null || deviceId.trim().isEmpty()) ? "NULL" : deviceId.trim();
+        String m = (moduleId == null || moduleId.trim().isEmpty()) ? "NULL" : moduleId.trim();
+        return d + "_" + m;
+    }
+
+    /** 密码模块 ID 是否符合附录 B 的形态（22 位十进制数字）。空值不算违规，返回 false。 */
+    public static boolean isValidModuleId(String moduleId) {
+        if (moduleId == null || moduleId.isEmpty()) {
+            return false;
+        }
+        if (moduleId.length() != MODULE_ID_LENGTH) {
+            return false;
+        }
+        for (int i = 0; i < moduleId.length(); i++) {
+            if (!Character.isDigit(moduleId.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 取证书签发者 DN（RFC2253 形式）。 */
@@ -234,10 +352,112 @@ public final class Gb35114CertUtil {
      * 证书是否自签（issuer 与 subject 完全相同）。
      *
      * <p>只比对 DN，不做签名验证：这里要回答的是「这张证书是不是自己签的自己」，
-     * 用于把「自签」与「由未导入的外部 CA 签发」区分开，而两者都表现为没有 caId。
+     * 用于在展示层区分「自签」与「由未导入的外部 CA 签发」这两种情况。
+     *
+     * <p>注意它<b>不再是</b>「{@code caId} 为空」的解释依据：反查签发者时自签证书同样
+     * 走验签路径，能关联到「同一张证书已作为 CA 导入」的那条记录，因此 {@code caId}
+     * 为空现在只表示「签发者未导入本平台」。
      */
     public static boolean isSelfSigned(X509Certificate cert) {
         return cert.getIssuerX500Principal().equals(cert.getSubjectX500Principal());
+    }
+
+    /**
+     * 单级证书链校验：判定 {@code leaf} 是否由 {@code issuer} 签发。
+     *
+     * <p>通过返回 {@code null}；不通过返回可直接呈现给运维的中文原因。
+     *
+     * <p>判定分两步，顺序不可颠倒：
+     * <ol>
+     *   <li><b>验签</b>：{@code leaf.verify(issuer.getPublicKey())}。这是权威判定 ——
+     *       只有真正签发 {@code leaf} 的那把私钥所对应的公钥才验得过。刻意<b>不比对
+     *       issuer/subject DN</b>：厂商证书的属性顺序与空格差异会造成假阴性，把合法证书
+     *       判死；而 DN 相同的两张 CA 也完全可能密钥不同
+     *       （见 {@code Gb35114IssuerResolveTest#sameNameCasAreDistinguishedBySignature}），
+     *       按 DN 判定反而会串台。</li>
+     *   <li><b>CA 资格</b>：见 {@link #isCaCertificate}。验签通过只说明「密钥对得上」，
+     *       不代表这张证书被授权去签别的证书。</li>
+     * </ol>
+     *
+     * <p><b>不查有效期与吊销</b>：到期是否拦截是运维策略（{@code gb35114.reject-expired-cert}），
+     * 吊销由证书记录本身承担，二者都不属于「链是否正确」这一判定。
+     */
+    public static String chainFailureReason(X509Certificate leaf, X509Certificate issuer) {
+        if (issuer == null) {
+            return "签发者证书为空";
+        }
+        String issuerName = commonNameOf(issuer);
+        try {
+            leaf.verify(issuer.getPublicKey());
+        } catch (Exception e) {
+            return "证书签名无法用「" + issuerName + "」的公钥验证：该证书不是由它签发的"
+                    + "（可能由其它 CA 签发，或证书已被篡改）";
+        }
+        if (!isCaCertificate(issuer)) {
+            return "「" + issuerName + "」不具备 CA 资格（keyUsage 缺少 keyCertSign，"
+                    + "且 basicConstraints 未置 CA），不能作为签发者";
+        }
+        return null;
+    }
+
+    /**
+     * 该证书是否具备 CA 资格。
+     *
+     * <p>判定为「{@code basicConstraints} 置了 CA <b>或</b> {@code keyUsage} 含
+     * {@code keyCertSign}」—— 两者<b>取或</b>，不是取与。
+     *
+     * <p>为什么必须取或：<b>本平台自己生成的 CA 只写 keyUsage，没有 basicConstraints</b>
+     * （{@code generateSelfSigned} / {@code buildAndSign} 仅通过 {@code addKeyUsage}
+     * 写入 keyUsage 扩展）。若硬性要求 basicConstraints CA:TRUE，本平台的本地 CA 会被判为
+     * 不具备资格，UAS 侧链校验一开就把所有设备挡在门外。反过来，OpenSSL、厂商工具签出的
+     * CA 常常只有 basicConstraints 而没有 keyUsage，所以也不能只认 keyUsage。
+     */
+    public static boolean isCaCertificate(X509Certificate cert) {
+        if (cert == null) {
+            return false;
+        }
+        try {
+            X509CertificateHolder holder = new X509CertificateHolder(cert.getEncoded());
+            BasicConstraints bc = BasicConstraints.fromExtensions(holder.getExtensions());
+            if (bc != null && bc.isCA()) {
+                return true;
+            }
+            KeyUsage ku = KeyUsage.fromExtensions(holder.getExtensions());
+            return ku != null && ku.hasUsages(KeyUsage.keyCertSign);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 两张证书是否持有同一把公钥。
+     *
+     * <p>同密钥即同一签名身份，与证书序列号、DN、公钥编码形式都无关。用于判定
+     * 「这张证书是不是就是那张 CA」（自签根作为自己的锚）——自签证书的签名只能被
+     * 与它公钥相同的证书验过，因此这是唯一可靠的同一性判定。
+     */
+    public static boolean sameKey(X509Certificate a, X509Certificate b) {
+        if (a == null || b == null) {
+            return false;
+        }
+        try {
+            return publicKeyFingerprint(a).equals(publicKeyFingerprint(b));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 取证书主题的 CN，取不到时退回完整 DN。仅用于拼装可读的提示文本。 */
+    private static String commonNameOf(X509Certificate cert) {
+        try {
+            RDN[] rdns = new X500Name(cert.getSubjectX500Principal().getName()).getRDNs(BCStyle.CN);
+            if (rdns.length > 0) {
+                return IETFUtils.valueToString(rdns[0].getFirst().getValue());
+            }
+        } catch (Exception ignored) {
+            // 落到完整 DN
+        }
+        return subjectDn(cert);
     }
 
     /**
@@ -247,7 +467,7 @@ public final class Gb35114CertUtil {
      * {@code digitalSignature}（默认）、{@code nonRepudiation}、{@code keyEncipherment}、
      * {@code dataEncipherment}、{@code keyAgreement}、{@code keyCertSign}、{@code cRLSign}。
      * 为空时返回 {@code defaultValue}；无法识别时抛异常而非静默忽略，
-     * 避免签出的证书用途与用户预期不符。
+     * 避免签出的证书类型与用户预期不符。
      */
     public static int parseKeyUsage(String spec, int defaultValue) {
         if (spec == null || spec.trim().isEmpty()) {
@@ -346,6 +566,9 @@ public final class Gb35114CertUtil {
 
     /** 解析 CSR PEM。 */
     public static PKCS10CertificationRequest parseCsr(String csrPem) throws Exception {
+        if (csrPem == null || csrPem.isEmpty()) {
+            throw new IllegalArgumentException("CSR 内容为空，无法解析");
+        }
         try (PEMParser parser = new PEMParser(new StringReader(csrPem))) {
             Object obj = parser.readObject();
             if (obj instanceof PKCS10CertificationRequest) {
@@ -436,6 +659,30 @@ public final class Gb35114CertUtil {
         return new Gb35114Identity(cert, privateKey, toPem(cert), keyPem);
     }
 
+    /**
+     * 用 CSR 里的主题与公钥<b>自签</b>一张证书，不生成新密钥对。
+     *
+     * <p>用于「服务端证书（本平台）先出 CSR、再由本平台自签」：私钥在
+     * {@link #generateCsr(X500Name)} 那一步就已加密留存，签发必须复用 CSR 的公钥 ——
+     * 若另生成密钥对，签出的证书与留存的私钥不配对，设备侧验 sign2 必然失败。
+     * issuer 与 subject 相同（自签的固有含义）。
+     *
+     * <p>{@code keyPem} 只用于签名，不被校验是否与 CSR 公钥配对 —— 配对的把关由调用方
+     * 用 {@link #matches(String, String)} 在写库前完成。
+     *
+     * @param csrPem    CSR（主题与公钥的来源，调用方无法覆盖）
+     * @param keyPem    已留存的私钥 PEM
+     */
+    public static Gb35114Identity selfSignFromCsr(String csrPem, String keyPem,
+                                                  Date notBefore, Date notAfter,
+                                                  int keyUsage) throws Exception {
+        PKCS10CertificationRequest csr = parseCsr(csrPem);
+        PublicKey publicKey = new JcaPEMKeyConverter()
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .getPublicKey(csr.getSubjectPublicKeyInfo());
+        return selfSignWithKey(csr.getSubject(), publicKey, keyPem, notBefore, notAfter, keyUsage);
+    }
+
     /** 用 CA 身份签发一张 SM2 证书。 */
     public static Gb35114Identity issue(Gb35114Identity ca, String subjectCn,
                                         Date notBefore, Date notAfter) throws Exception {
@@ -447,6 +694,20 @@ public final class Gb35114CertUtil {
                                         Date notBefore, Date notAfter) throws Exception {
         KeyPair kp = generateKeyPair();
         X509Certificate cert = buildAndSign(ca, subject, kp.getPublic(), notBefore, notAfter, KEY_USAGE_ENTITY);
+        return toIdentity(cert, kp.getPrivate());
+    }
+
+    /**
+     * 用 CA 身份签发一张 SM2 证书，并写入密钥用途扩展。
+     *
+     * <p>与 {@link #issueWithKey} 的区别是<b>自己生成密钥对</b>，返回的身份里带着私钥
+     * （{@code keyPem}），供本平台加密留存 —— 「一步创建」正是靠它省掉
+     * 「先建 CSR 存私钥、再签发」这两步。
+     */
+    public static Gb35114Identity issue(Gb35114Identity ca, X500Name subject,
+                                        Date notBefore, Date notAfter, int keyUsage) throws Exception {
+        KeyPair kp = generateKeyPair();
+        X509Certificate cert = buildAndSign(ca, subject, kp.getPublic(), notBefore, notAfter, keyUsage);
         return toIdentity(cert, kp.getPrivate());
     }
 
@@ -497,6 +758,11 @@ public final class Gb35114CertUtil {
 
     /** 从 PEM 加载证书（不含私钥）。 */
     public static X509Certificate loadCertificate(String pem) throws Exception {
+        // 空 PEM 直接给出可读原因：交给 StringReader 会抛
+        // 「Cannot invoke "String.length()" because "s" is null」，看不出是「没有证书内容」。
+        if (pem == null || pem.isEmpty()) {
+            throw new IllegalArgumentException("证书内容为空，无法解析");
+        }
         try (PEMParser parser = new PEMParser(new StringReader(pem))) {
             Object obj = parser.readObject();
             if (obj instanceof X509CertificateHolder) {
@@ -517,6 +783,9 @@ public final class Gb35114CertUtil {
 
     /** 加载私钥（PKCS#8 或 SEC1 或加密 PKCS#8）。 */
     public static PrivateKey loadPrivateKey(String keyPem) throws Exception {
+        if (keyPem == null || keyPem.isEmpty()) {
+            throw new IllegalArgumentException("私钥内容为空，无法解析");
+        }
         try (PEMParser parser = new PEMParser(new StringReader(keyPem))) {
             Object obj = parser.readObject();
             JcaPEMKeyConverter converter = new JcaPEMKeyConverter()

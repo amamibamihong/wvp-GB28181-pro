@@ -51,8 +51,7 @@ Failed to start thread "GC Thread#0" - pthread_create failed (EPERM)
 │   ├── application-host.yml         # 宿主机直跑配置（实际生效）
 │   └── application.yml              # 容器内网络配置（备用）
 ├── mysql/
-│   ├── 01-init.sql                  # wvp 2.7.4 全量建表（MySQL 兼容语法）
-│   ├── 02-gb35114.sql               # GB35114 两张表 + wvp_device 增列
+│   ├── 01-init.sql                  # wvp 2.7.4 全量建表，含 GB35114 两表与 tds_bypass
 │   └── data/                        # MySQL 数据卷
 ├── redis/data/                      # Redis 数据卷
 └── logs/                            # 运行日志
@@ -81,20 +80,19 @@ cp .env.example .env && vi .env     # 填 <部署服务器> 的地址与各口�
 ```bash
 scp target/wvp-pro-2.7.4-*.jar root@<部署服务器>:/opt/wvp-gb35114/wvp.jar
 scp 数据库/2.7.4/初始化-mysql-2.7.4.sql root@<部署服务器>:/opt/wvp-gb35114/mysql/01-init.sql
-scp 数据库/2.7.4/更新-gb35114-mysql.sql root@<部署服务器>:/opt/wvp-gb35114/mysql/02-gb35114.sql
 scp docker/gb35114-deploy/.env root@<部署服务器>:/opt/wvp-gb35114/.env
 ```
 
-> 注：`02-gb35114.sql` 仓库内为幂等版（存储过程判列）。Docker `initdb.d`
-> 只在首次初始化执行一次，故服务器上用的是简洁版（直接 `ALTER`），
-> 见 `docker/gb35114-deploy/` 目录说明。
+> 注：`01-init.sql` 已含 GB35114 两张表、`wvp_device`/`wvp_platform` 的证书关联列以及
+> `tds_bypass`，新部署只执行它即可。`数据库/2.7.4/更新-*.sql` 只在**老库升级**时手工执行，
+> 不放进 `initdb.d`。
 
 ### 3. 启动 mysql / redis 容器
 
 ```bash
 cd /opt/wvp-gb35114
 docker compose up -d wvp-gb35114-mysql wvp-gb35114-redis
-# 等待 mysql healthy（会自动执行 01/02 初始化 SQL）
+# 等待 mysql healthy（会自动执行 01-init.sql）
 ```
 
 ### 4. 宿主机 JDK 直跑 wvp

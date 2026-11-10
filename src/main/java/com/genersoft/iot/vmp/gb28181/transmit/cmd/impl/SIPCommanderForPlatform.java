@@ -16,6 +16,7 @@ import com.genersoft.iot.vmp.gb28181.utils.SipUtils;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114DeviceStateMachine;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114SecurityService;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114SipHeaders;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114VkekPeriod;
 import com.genersoft.iot.vmp.media.bean.MediaServer;
 import com.genersoft.iot.vmp.media.event.hook.HookSubscribe;
 import com.genersoft.iot.vmp.media.service.IMediaServerService;
@@ -126,10 +127,27 @@ public class SIPCommanderForPlatform implements ISIPCommanderForPlatform {
                 }
             }
 
+            // GB 35114—2017 6.14.3：VKEK 更新周期不大于 1 天。本实现里 VKEK 只在注册握手时
+            // 生成，故本平台发出的注册周期即 VKEK 更新周期，必须 ≤ 1 天。
+            // 保存路径（PlatformController#clampVkekPeriod）已经钳过，这里再钳一次是兜底：
+            // 库里可能存在钳制上线前写入的存量超限值，而本平台注册到上级时发出的就是这个值。
+            // 只对国密接入（3/4）钳 —— 普通 Digest 级联没有 VKEK，不该被这条改变行为。
+            int registerExpires = 0;
+            if (isRegister) {
+                int requestedExpires = parentPlatform.getExpires();
+                boolean gb35114Way = parentPlatform.getRegisterWay() == 3 || parentPlatform.getRegisterWay() == 4;
+                registerExpires = gb35114Way ? Gb35114VkekPeriod.clamp(requestedExpires) : requestedExpires;
+                if (gb35114Way && Gb35114VkekPeriod.exceeds(requestedExpires)) {
+                    log.warn("[GB35114级联] 上级 {} 的注册周期 {}s 超过 GB 35114—2017 6.14.3 的"
+                                    + "1 天上限，本次注册按 {}s 发出（该值同时是 VKEK 更新周期）",
+                            parentPlatform.getServerGBId(), requestedExpires, registerExpires);
+                }
+            }
+
             if (www == null ) {
                 request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform,
                         redisCatchStorage.getCSEQ(), fromTag,
-                        toTag, callIdHeader, isRegister? parentPlatform.getExpires() : 0);
+                        toTag, callIdHeader, registerExpires);
 
                 // GB35114 A 级：本平台作为下级，registerWay=3/4 时首包用 Capability 宣告（无 Digest 认证头）。
                 if (gb35114SecurityService.isEnabled()
@@ -149,7 +167,7 @@ public class SIPCommanderForPlatform implements ISIPCommanderForPlatform {
                 if ("Bidirection".equalsIgnoreCase(scheme) || "Unidirection".equalsIgnoreCase(scheme)) {
                     request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform,
                             redisCatchStorage.getCSEQ(), fromTag,
-                            toTag, callIdHeader, isRegister ? parentPlatform.getExpires() : 0);
+                            toTag, callIdHeader, registerExpires);
                     Gb35114DeviceStateMachine machine = gb35114SecurityService.uacStateMachine(
                             parentPlatform.getDeviceGBId(), parentPlatform.getServerGBId(),
                             parentPlatform.getDeviceCertId(), parentPlatform.getPlatformCertId());
@@ -160,7 +178,20 @@ public class SIPCommanderForPlatform implements ISIPCommanderForPlatform {
                     String authorization = machine.authorizeWithChallenge(Gb35114SipHeaders.value(www));
                     Gb35114SipHeaders.addRawHeader(request, "Authorization", authorization);
                 } else {
-                    request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform, fromTag, toTag, www, callIdHeader, isRegister? parentPlatform.getExpires() : 0);
+                    // 配了国密接入（registerWay=3/4），首包也正确宣告了 Capability，但对端回的
+                    // 401 不是国密挑战。此时若照常按 Digest 应答，握手会「静默降级」：本平台注册
+                    // 在线、目录也能拿到，但 VKEK 永远不会协商出来，后续所有控制信令都以明文发出
+                    // （见 Gb35114NoteIntegrator 的「未找到该对端的 VKEK」），而界面上完全看不出异常。
+                    // 这里必须显式报错，把「国密未生效」变成运维可见的事实。
+                    if (parentPlatform.getRegisterWay() == 3 || parentPlatform.getRegisterWay() == 4) {
+                        log.error("[GB35114级联] 上级 {} 配置为国密接入（registerWay={}），"
+                                        + "但 401 挑战的 scheme 是 {}，不是 Bidirection/Unidirection。"
+                                        + "本次将按普通 Digest 应答，国密握手不会进行，"
+                                        + "VKEK 无法协商，后续控制信令将以明文发送。"
+                                        + "请检查上级平台的 GB35114 安全能力是否已开启。",
+                                parentPlatform.getServerGBId(), parentPlatform.getRegisterWay(), scheme);
+                    }
+                    request = headerProviderPlatformProvider.createRegisterRequest(parentPlatform, fromTag, toTag, www, callIdHeader, registerExpires);
                 }
             }
 

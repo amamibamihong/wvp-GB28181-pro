@@ -36,6 +36,9 @@ create table IF NOT EXISTS wvp_device
     position_capability                 integer COMMENT '定位能力标识',
     broadcast_push_after_ack            bool    default false COMMENT 'ACK后是否自动推流',
     server_id                           character varying(50) COMMENT '所属信令服务器ID',
+    register_way                        integer default 1 COMMENT '注册方式：1-摘要，3-证书双向，4-证书单向',
+    cert_id                             integer COMMENT '关联的国密证书ID（wvp_gb35114_cert.id）',
+    server_cert_id                      integer COMMENT '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用平台唯一的那张服务端证书）',
     constraint uk_device_device unique (device_id)
 );
 
@@ -245,6 +248,8 @@ create table IF NOT EXISTS wvp_platform
     auto_push_channel     bool default true COMMENT '是否自动推送通道',
     send_stream_ip        character varying(50) COMMENT '推流时使用的IP',
     server_id             character varying(50) COMMENT '对应信令服务器ID',
+    device_cert_id        integer COMMENT '本平台作下级注册的设备证书ID（wvp_gb35114_cert.id）',
+    platform_cert_id      integer COMMENT '受信上级平台证书ID（wvp_gb35114_cert.id）',
     constraint uk_platform_unique_server_gb_id unique (server_gb_id)
 );
 
@@ -536,4 +541,66 @@ create table IF NOT EXISTS wvp_alarm (
                           latitude double precision COMMENT '报警附带的纬度',
                           alarm_type integer COMMENT '报警类别',
                           alarm_time bigint COMMENT '报警时间'
+);
+
+-- GB35114 A 级国密证书管理表
+
+-- 根 CA 表
+create table IF NOT EXISTS wvp_gb35114_ca
+(
+    id                  serial primary key COMMENT '主键ID',
+    type                character varying(20) DEFAULT 'LOCAL_CA'
+                        COMMENT '类型：LOCAL_CA-本地CA(可签发，全局唯一) / TRUSTED_CA-受信任的CA(仅公钥，可重复导入)',
+    subject_cn          character varying(255) COMMENT '主题 CN',
+    subject_dn          character varying(500) COMMENT '完整主题DN（RFC2253）',
+    country             character varying(10) COMMENT '国家 C',
+    province            character varying(64) COMMENT '省份 ST',
+    locality            character varying(64) COMMENT '城市 L',
+    organization        character varying(255) COMMENT '组织 O',
+    organizational_unit character varying(255) COMMENT '组织单位 OU',
+    serial_number       character varying(100) COMMENT '序列号',
+    cert_pem            text COMMENT '证书 PEM',
+    key_pem             text COMMENT '私钥 PEM（对称加密存储）',
+    not_before          character varying(50) COMMENT '生效时间',
+    not_after           character varying(50) COMMENT '失效时间',
+    remark              character varying(500) COMMENT '备注',
+    create_time         character varying(50) COMMENT '创建时间'
+);
+
+-- 证书表
+create table IF NOT EXISTS wvp_gb35114_cert
+(
+    id                  serial primary key COMMENT '主键ID',
+    type                character varying(30) DEFAULT 'ISSUED_DEVICE'
+                        COMMENT '证书类型：SERVER_IDENTITY-服务端证书(本平台) / DEVICE_IDENTITY-客户端证书(本平台) / ISSUED_DEVICE-客户端证书(下级设备) / TRUSTED_PLATFORM-服务端证书(上级平台)',
+    gb_id               character varying(50) COMMENT '关联国标 ID',
+    subject_cn          character varying(255) COMMENT '主题 CN',
+    subject_dn          character varying(500) COMMENT '完整主题DN（RFC2253）',
+    module_id           character varying(64) COMMENT '密码模块 ID（附录B，22位十进制）；空表示无密码模块',
+    country             character varying(10) COMMENT '国家 C',
+    province            character varying(64) COMMENT '省份 ST',
+    locality            character varying(64) COMMENT '城市 L',
+    organization        character varying(255) COMMENT '组织 O',
+    organizational_unit character varying(255) COMMENT '组织单位 OU',
+    serial_number       character varying(100) COMMENT '序列号',
+    ca_id               integer COMMENT '签发 CA 的 ID，null 表示自签',
+    cert_pem            text COMMENT '证书 PEM',
+    key_pem             text COMMENT '私钥 PEM（对称加密存储）',
+    csr_pem             text COMMENT '待签发记录的CSR PEM（私钥与之同记录）',
+    not_before          character varying(50) COMMENT '生效时间',
+    not_after           character varying(50) COMMENT '失效时间',
+    validity_days       integer COMMENT '签发时的有效期天数快照',
+    key_usage           character varying(200) COMMENT '密钥用途扩展，如 digitalSignature、keyCertSign|cRLSign',
+    revoked             bool default false COMMENT '是否已吊销',
+    key_fingerprint     character varying(64) COMMENT '公钥指纹（SM3 十六进制）；相同表示同一个签名身份，证书可互换',
+    remark              character varying(500) COMMENT '备注',
+    create_time         character varying(50) COMMENT '创建时间',
+    key idx_gb35114_cert_type (type, gb_id),
+    key idx_gb35114_cert_fingerprint (type, key_fingerprint)
+);
+
+-- 旁路转推映射表：dest_url（转码后地址） -> src_url（转码前源地址）
+create table IF NOT EXISTS tds_bypass (
+                          dest_url character varying(255) primary key COMMENT '转码后地址',
+                          src_url  character varying(255) not null COMMENT '转码前源地址'
 );

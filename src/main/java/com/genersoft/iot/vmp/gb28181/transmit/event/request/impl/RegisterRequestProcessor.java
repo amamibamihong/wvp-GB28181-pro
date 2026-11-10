@@ -14,11 +14,13 @@ import com.genersoft.iot.vmp.gb28181.transmit.SIPSender;
 import com.genersoft.iot.vmp.gb28181.transmit.event.request.ISIPRequestProcessor;
 import com.genersoft.iot.vmp.gb28181.transmit.event.request.SIPRequestProcessorParent;
 import com.genersoft.iot.vmp.gb28181.utils.SipUtils;
+import com.genersoft.iot.vmp.gb35114.crypto.Gb35114HeaderUtil;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114Exception;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114PlatformStateMachine;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114SecurityService;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114SipHeaders;
 import com.genersoft.iot.vmp.gb35114.sip.Gb35114VkekCache;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114VkekPeriod;
 import com.genersoft.iot.vmp.storager.IRedisCatchStorage;
 import com.genersoft.iot.vmp.utils.IpPortUtil;
 import gov.nist.javax.sip.address.AddressImpl;
@@ -32,6 +34,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.util.ObjectUtils;
 
+import javax.sip.InvalidArgumentException;
 import javax.sip.RequestEvent;
 import javax.sip.SipException;
 import javax.sip.header.AuthorizationHeader;
@@ -126,7 +129,7 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
             } else {
                 cancellationHandler(device, request, remoteAddressInfo, deviceId, requestAddress);
             }
-        } catch (SipException | NoSuchAlgorithmException | ParseException e) {
+        } catch (SipException | NoSuchAlgorithmException | ParseException | InvalidArgumentException e) {
             log.error("未处理的异常 ", e);
         }
     }
@@ -154,7 +157,7 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
     }
 
     private void registerHandler(Device device, SIPRequest request, RemoteAddressInfo remoteAddressInfo,
-                                  String deviceId, String requestAddress) throws SipException, NoSuchAlgorithmException, ParseException {
+                                  String deviceId, String requestAddress) throws SipException, NoSuchAlgorithmException, ParseException, InvalidArgumentException {
         // GB35114 A 级：优先按请求头识别国密注册。
         // 设备是主动注册过来的，首包时库里可能还没有这条设备记录（被动注册），
         // 因此不能只依赖预置的 registerWay；Authorization 的 scheme 才是权威依据。
@@ -289,15 +292,15 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
 
     private void gb35114RegisterHandler(Device device, SIPRequest request, RemoteAddressInfo remoteAddressInfo,
                                         String deviceId, String requestAddress, int registerWay)
-            throws SipException, ParseException {
+            throws SipException, ParseException, InvalidArgumentException {
         // 国密握手里的 serverid 是「平台的国标编码」，即 sip.id（如 35020000002000000001），
         // 不是 userSetting.serverId（那是集群内节点标识，默认 000000）。
         // 设备签名 sign1 时用的就是 sip.id，这里必须一致，否则报 server id mismatch。
         //
         // 签名身份必须与「该设备配置时导入的平台证书」配对，否则设备验 sign2 失败并
-        // 拒绝对后续信令服务。平台可并存多张服务端证书，故优先取设备级绑定；
-        // 未绑定时由 Gb35114SecurityService 回退到全局配置/默认证书。
-        // 绑定/配置的证书若已吊销或过期，这里会抛异常并回 403 —— 过期即拒绝接入，
+        // 拒绝对后续信令服务。优先取设备级绑定；未绑定时用证书表中唯一的那张服务端证书
+        // （该类型由后端强制唯一，见 Gb35114SecurityService#platformStateMachine）。
+        // 绑定的证书若已吊销或同密钥组内已无可用证书，这里会抛异常并回 403，
         // 不做「换一张证书再签」的静默降级（那会让设备侧验签失败，故障点漂到设备侧）。
         Integer deviceServerCertId = device == null ? null : device.getServerCertId();
         Gb35114PlatformStateMachine machine;
@@ -317,11 +320,22 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
 
         if ("Capability".equalsIgnoreCase(scheme)) {
             // 首包：生成 random1 挑战，回 401。
-            String www = machine.challenge(deviceId, authorization);
+            //
+            // 挑战的 scheme 由平台统一配置（gb35114.auth-mode）决定，不按设备逐台选：
+            // GB 35114—2017 6.4.2 的措辞是「管理平台应对所有接入的 FDWSF 进行单向设备身份认证
+            // 或者双向设备身份认证」——主语是「所有接入的 FDWSF」，两种方式二选一，是平台级设置。
+            // 43026 表 A.1 序号 6（单向）、7（双向）为并列必测项，测试时切换该配置分别验证。
+            //
+            // 不使用设备表的 register_way 作为依据：那个字段会被注册流程按设备实际应答的 scheme
+            // 覆写（见本类 target.setRegisterWay），若同时当输入用会形成自锁——一旦是 3 就永远
+            // 回 Bidirection，设备也永远回 Bidirection，单向永远走不到。
+            Gb35114HeaderUtil.Mode challengeMode = gb35114SecurityService.authMode();
+            String www = machine.challenge(deviceId, authorization, challengeMode);
             Response response = getMessageFactory().createResponse(Response.UNAUTHORIZED, request);
             Gb35114SipHeaders.addRawHeader(response, "WWW-Authenticate", www);
             sipSender.transmitRequest(request.getLocalAddress().getHostAddress(), response);
-            log.info("[GB35114注册] 设备：{} 收到 Capability，回 401 challenge（mode={}）", deviceId, registerWay);
+            log.info("[GB35114注册] 设备：{} 收到 Capability，回 401 challenge（mode={}）",
+                    deviceId, challengeMode);
             return;
         }
 
@@ -343,10 +357,22 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
                 gb35114VkekCache.put(deviceId, vkek);
             }
 
+            // GB 35114—2017 6.14.3：VKEK 更新周期不大于 1 天。VKEK 只在注册握手时生成，
+            // 因此「注册周期」就是「VKEK 更新周期」—— 设备请求的 Expires 超过 1 天时，
+            // 回一个被压到上限的值，设备据此提前重注册，VKEK 随之刷新。
+            // 只压 GB35114 这一路：普通 Digest 注册与 VKEK 无关，不该被这条改变行为。
+            int requestedExpires = request.getExpires().getExpires();
+            int effectiveExpires = Gb35114VkekPeriod.clamp(requestedExpires);
+            if (Gb35114VkekPeriod.exceeds(requestedExpires)) {
+                log.warn("[GB35114注册] 设备：{} 请求注册周期 {}s 超过 GB 35114—2017 6.14.3 的"
+                                + "1 天上限，已压至 {}s；VKEK 更新周期随之满足不大于 1 天",
+                        deviceId, requestedExpires, effectiveExpires);
+            }
+
             Response response = getMessageFactory().createResponse(Response.OK, request);
             Gb35114SipHeaders.addRawHeader(response, "SecurityInfo", securityInfo);
             response.addHeader(request.getHeader(ContactHeader.NAME));
-            response.addHeader(request.getExpires());
+            response.addHeader(getHeaderFactory().createExpiresHeader(effectiveExpires));
 
             sipSender.transmitRequest(request.getLocalAddress().getHostAddress(), response);
 
@@ -377,7 +403,10 @@ public class RegisterRequestProcessor extends SIPRequestProcessorParent implemen
             target.setPort(remoteAddressInfo.getPort());
             target.setHostAddress(IpPortUtil.concatenateIpAndPort(remoteAddressInfo.getIp(), String.valueOf(remoteAddressInfo.getPort())));
             target.setLocalIp(request.getLocalAddress().getHostAddress());
-            target.setExpires(request.getExpires().getExpires());
+            // 落库用实际生效值（已钳制），而不是设备请求值：设备会按 200 OK 里的周期重注册，
+            // 库里的 expires 参与离线判定（DeviceServiceImpl 取它与心跳窗口的较小者），
+            // 存大了会让设备早已重注册、界面却仍显示在线。
+            target.setExpires(effectiveExpires);
 
             ViaHeader reqViaHeader = (ViaHeader) request.getHeader(ViaHeader.NAME);
             String transport = reqViaHeader.getTransport();

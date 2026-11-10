@@ -7,12 +7,12 @@ import lombok.Data;
 /**
  * GB35114 证书记录。
  *
- * <p>证书按<b>用途</b>（{@link #purpose}）区分，而非仅按服务器/设备区分：
+ * <p>证书按<b>类型</b>（{@link #type}）区分，而非仅按服务器/设备区分：
  * <ul>
- *   <li>{@link #PURPOSE_SERVER_IDENTITY} 本地服务端证书：本平台作 UAS，签 sign2，私钥在本平台；</li>
- *   <li>{@link #PURPOSE_DEVICE_IDENTITY} 本地客户端证书：本平台作 UAC，签 sign1，私钥在本平台（通常上级颁发）；</li>
- *   <li>{@link #PURPOSE_ISSUED_DEVICE} 下级客户端证书：签发给下级设备/平台，私钥不在本平台；</li>
- *   <li>{@link #PURPOSE_TRUSTED_PLATFORM} 上级服务端证书：仅公钥，用于验 sign2。</li>
+ *   <li>{@link #TYPE_SERVER_IDENTITY} 服务端证书（本平台）：本平台作 UAS，签 sign2，私钥在本平台；</li>
+ *   <li>{@link #TYPE_DEVICE_IDENTITY} 客户端证书（本平台）：本平台作 UAC，签 sign1，私钥在本平台（通常上级颁发）；</li>
+ *   <li>{@link #TYPE_ISSUED_DEVICE} 客户端证书（下级设备）：签发给下级设备/平台，私钥不在本平台；</li>
+ *   <li>{@link #TYPE_TRUSTED_PLATFORM} 服务端证书（上级平台）：仅公钥，用于验 sign2。</li>
  * </ul>
  *
  * <p>{@link #keyPem} 为私钥密文，仅本平台自持私钥的证书才有，且<b>永不下发到前端</b>
@@ -22,34 +22,46 @@ import lombok.Data;
 @Schema(description = "GB35114 证书")
 public class Gb35114Cert {
 
-    /** 本地服务端证书（UAS，签 sign2）。 */
-    public static final String PURPOSE_SERVER_IDENTITY = "SERVER_IDENTITY";
-    /** 本地客户端证书（UAC，签 sign1，通常上级颁发）。 */
-    public static final String PURPOSE_DEVICE_IDENTITY = "DEVICE_IDENTITY";
-    /** 下级客户端证书（签发给下级，私钥交付下级）。 */
-    public static final String PURPOSE_ISSUED_DEVICE = "ISSUED_DEVICE";
-    /** 上级服务端证书（仅公钥，验 sign2）。 */
-    public static final String PURPOSE_TRUSTED_PLATFORM = "TRUSTED_PLATFORM";
-
-    /** 服务器证书。 */
-    public static final int TYPE_SERVER = 1;
-    /** 设备（客户端）证书。 */
-    public static final int TYPE_DEVICE = 2;
+    /** 服务端证书（本平台）·UAS，签 sign2）。 */
+    public static final String TYPE_SERVER_IDENTITY = "SERVER_IDENTITY";
+    /** 客户端证书（本平台）·UAC，签 sign1，通常上级颁发）。 */
+    public static final String TYPE_DEVICE_IDENTITY = "DEVICE_IDENTITY";
+    /** 客户端证书（下级设备）·签发给下级，私钥交付下级）。 */
+    public static final String TYPE_ISSUED_DEVICE = "ISSUED_DEVICE";
+    /** 服务端证书（上级平台）·仅公钥，验 sign2）。 */
+    public static final String TYPE_TRUSTED_PLATFORM = "TRUSTED_PLATFORM";
 
     @Schema(description = "主键ID")
     private Integer id;
 
-    @Schema(description = "证书用途")
-    private String purpose;
-
-    @Schema(description = "证书类型：1-服务器证书，2-设备证书（由用途派生，兼容旧字段）")
-    private Integer type;
+    /**
+     * 证书类型（四个取值见上面的 {@code TYPE_*} 常量）。
+     *
+     * <p>该列<b>取代</b>了历史上的 {@code purpose varchar} + {@code type integer} 两列：
+     * 后者只是前者的派生投影（写 2 处、读 0 处），而且<b>有损</b> ——
+     * {@link #TYPE_SERVER_IDENTITY}（本平台作 UAS）与 {@link #TYPE_TRUSTED_PLATFORM}
+     * （上级平台作 UAS）方向相反却同落成 1。现在一个概念一个名字。
+     */
+    @Schema(description = "证书类型")
+    private String type;
 
     @Schema(description = "关联国标 ID（设备编号或平台编号）")
     private String gbId;
 
     @Schema(description = "主题 DN（CN）")
     private String subjectCn;
+
+    /**
+     * 密码模块 ID（GB 35114—2017 附录 B，22 位十进制编码）。
+     *
+     * <p>来源是设备证书 CN 里「设备ID_密码模块ID」的后半段（附录 A 表 A.1 第 6 项）。
+     * 单列出来是为了满足 GB/T 43026—2023 表 4 序号 1「设备身份管理」——
+     * 该检验项要求平台能展示「设备 ID、其密码模块 ID 与设备证书的对应关系」，
+     * 只给一个 CN 字符串是过不了的。本平台无硬件密码模块时由用户填写，
+     * 默认全 0（见 {@code Gb35114CertUtil.MODULE_ID_PLACEHOLDER}）。
+     */
+    @Schema(description = "密码模块 ID（附录 B，22 位）；无密码模块时默认全 0")
+    private String moduleId;
 
     @Schema(description = "完整主题 DN（RFC2253）")
     private String subjectDn;
@@ -99,7 +111,7 @@ public class Gb35114Cert {
 
     /**
      * 密钥用途扩展（X.509 KeyUsage），形如 {@code digitalSignature} 或
-     * {@code digitalSignature|nonRepudiation}；为空时按证书用途取默认值。
+     * {@code digitalSignature|nonRepudiation}；为空时按证书类型取默认值。
      */
     @Schema(description = "密钥用途扩展，如 digitalSignature、keyCertSign|cRLSign")
     private String keyUsage;
@@ -118,16 +130,6 @@ public class Gb35114Cert {
     @Schema(description = "公钥指纹（SM3）；相同表示同一个签名身份，可互换")
     private String keyFingerprint;
 
-    /**
-     * 是否为默认服务器证书。
-     *
-     * <p>只对 {@link #PURPOSE_SERVER_IDENTITY} 有意义：平台可以并存多张服务端证书，
-     * 但 UAS 签 sign2 时只能用一个私钥，因此必须有一张被显式指定为「未绑定设备的
-     * 设备注册时使用哪一张」。全局至多一张为 {@code true}。
-     */
-    @Schema(description = "是否默认服务器证书（仅 SERVER_IDENTITY 有意义）")
-    private Boolean isDefault;
-
     @Schema(description = "备注")
     private String remark;
 
@@ -145,7 +147,7 @@ public class Gb35114Cert {
     // 呈现给运维看：「这张证书给谁用了」。不新增表、不新增列。
     // ------------------------------------------------------------------
 
-    /** 关联的国标设备主键（仅 ISSUED_DEVICE：本平台为该设备签发的下级客户端证书）。 */
+    /** 关联的国标设备主键（仅 ISSUED_DEVICE：本平台为该设备签发的客户端证书（下级设备））。 */
     @Schema(description = "关联的国标设备主键（瞬态）")
     private Integer relatedDeviceId;
 
@@ -175,21 +177,24 @@ public class Gb35114Cert {
     @Schema(description = "是否自签（瞬态）")
     private Boolean selfSigned;
 
+    /**
+     * 导入时发现的问题提示（瞬态，仅导入响应填充，不落库）。
+     *
+     * <p>导入设备证书时，若签发它的 CA 还没导入本平台，这里带一条提示。<b>不阻断导入</b>：
+     * 「证书先导入、CA 后导入」是合法顺序，信任判定由设备注册时的链校验实时承担，
+     * 不依赖导入时这一眼。之所以仍要说，是因为不说的话这个问题要到设备注册失败才暴露 ——
+     * 那时用户面对的是「设备连不上」，而不是「少导了一张 CA」。
+     */
+    @Schema(description = "导入提示（瞬态）")
+    private String importWarning;
+
     /** 是否尚未签发（有 CSR 无证书）。 */
     public boolean isPending() {
         return (certPem == null || certPem.isEmpty()) && csrPem != null && !csrPem.isEmpty();
     }
 
-    /** 由用途派生兼容的 type 值。 */
-    public static int typeOf(String purpose) {
-        if (PURPOSE_SERVER_IDENTITY.equals(purpose) || PURPOSE_TRUSTED_PLATFORM.equals(purpose)) {
-            return TYPE_SERVER;
-        }
-        return TYPE_DEVICE;
-    }
-
-    /** 该用途是否由本平台持有私钥。 */
-    public static boolean holdsKey(String purpose) {
-        return PURPOSE_SERVER_IDENTITY.equals(purpose) || PURPOSE_DEVICE_IDENTITY.equals(purpose);
+    /** 该类型是否由本平台持有私钥。 */
+    public static boolean holdsKey(String type) {
+        return TYPE_SERVER_IDENTITY.equals(type) || TYPE_DEVICE_IDENTITY.equals(type);
     }
 }

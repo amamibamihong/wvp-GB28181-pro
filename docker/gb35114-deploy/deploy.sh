@@ -27,8 +27,9 @@ echo "==> 1. 传输 jar"
 scp ../../target/wvp-pro-2.7.4-*.jar root@${SERVER}:${DEPLOY_DIR}/wvp.jar
 
 echo "==> 2. 传输 SQL"
+# 只传全量初始化脚本（已含 GB35114 两表与 tds_bypass）。
+# 增量脚本仅用于老库升级，不参与部署流程。
 scp ../../数据库/2.7.4/初始化-mysql-2.7.4.sql root@${SERVER}:${DEPLOY_DIR}/mysql/01-init.sql
-scp ../../数据库/2.7.4/更新-gb35114-mysql.sql root@${SERVER}:${DEPLOY_DIR}/mysql/02-gb35114.sql
 
 echo "==> 3. 传输配置与 .env"
 scp config/application-host.yml root@${SERVER}:${DEPLOY_DIR}/config/application-host.yml

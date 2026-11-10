@@ -65,6 +65,41 @@ public interface PlatformMapper {
     @Delete("DELETE FROM wvp_platform WHERE id=#{id}")
     int delete(@Param("id") Integer id);
 
+    /**
+     * 清空某张证书在本表的绑定（两个引用列都清）。
+     *
+     * <p>供 GB35114 编辑页的「删除」使用：证书此刻仍被<b>本</b> platform 行按 ID 引用，
+     * 不先清空就会被 {@code assertNoCertReference} 拦下，删不掉。
+     * 只清匹配的那一列，不整行置空 —— 一行理论上可能同时绑设备证书与平台证书。
+     */
+    @Update("UPDATE wvp_platform SET device_cert_id = NULL WHERE device_cert_id = #{certId}")
+    @Update(value = "UPDATE wvp_platform SET device_cert_id = NULL WHERE device_cert_id = #{certId}",
+            databaseId = "dm")
+    int clearDeviceCertBinding(@Param("certId") int certId);
+
+    @Update("UPDATE wvp_platform SET platform_cert_id = NULL WHERE platform_cert_id = #{certId}")
+    @Update(value = "UPDATE wvp_platform SET platform_cert_id = NULL WHERE platform_cert_id = #{certId}",
+            databaseId = "dm")
+    int clearPlatformCertBinding(@Param("certId") int certId);
+
+    /**
+     * 写入「本平台设备证书」的绑定（{@code NULL} 表示解绑）。
+     *
+     * <p>刻意只更新这一列，而不是走 {@link #update(Platform)} 整行覆盖：绑定是证书槽
+     * 自己的动作，不该受整行保存的前置校验与唯一键（{@code uk_platform_unique_server_gb_id}）
+     * 牵连 —— 整行保存失败时，绑定也跟着丢，页面上却看不出来。
+     */
+    @Update("UPDATE wvp_platform SET device_cert_id = #{certId} WHERE id = #{platformId}")
+    @Update(value = "UPDATE wvp_platform SET device_cert_id = #{certId} WHERE id = #{platformId}",
+            databaseId = "dm")
+    int bindDeviceCert(@Param("platformId") int platformId, @Param("certId") Integer certId);
+
+    /** 写入「上级平台证书」的绑定（{@code NULL} 表示解绑）。与 {@link #bindDeviceCert} 同理。 */
+    @Update("UPDATE wvp_platform SET platform_cert_id = #{certId} WHERE id = #{platformId}")
+    @Update(value = "UPDATE wvp_platform SET platform_cert_id = #{certId} WHERE id = #{platformId}",
+            databaseId = "dm")
+    int bindPlatformCert(@Param("platformId") int platformId, @Param("certId") Integer certId);
+
     @Select(" <script>" +
             " SELECT pp.*, " +
             " ( (SELECT count(0) FROM wvp_platform_channel pc WHERE pc.platform_id = pp.id ) + " +

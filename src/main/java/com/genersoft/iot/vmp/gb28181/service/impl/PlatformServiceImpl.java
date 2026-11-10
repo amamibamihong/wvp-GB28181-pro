@@ -20,6 +20,7 @@ import com.genersoft.iot.vmp.gb28181.task.platformStatus.PlatformRegisterTask;
 import com.genersoft.iot.vmp.gb28181.task.platformStatus.PlatformRegisterTaskInfo;
 import com.genersoft.iot.vmp.gb28181.task.platformStatus.PlatformStatusTaskRunner;
 import com.genersoft.iot.vmp.gb28181.transmit.cmd.ISIPCommanderForPlatform;
+import com.genersoft.iot.vmp.gb35114.cert.service.IGb35114CertService;
 import com.genersoft.iot.vmp.gb28181.utils.SipUtils;
 import com.genersoft.iot.vmp.media.bean.MediaInfo;
 import com.genersoft.iot.vmp.media.bean.MediaServer;
@@ -113,6 +114,15 @@ public class PlatformServiceImpl implements IPlatformService {
 
     @Autowired
     private PlatformStatusTaskRunner statusTaskRunner;
+
+    /**
+     * GB35114 证书服务，用于「新增上级时判断国密证书是否已配齐」。
+     *
+     * <p>{@code required = false}：GB35114 是可选模块，未引入时整体降级为「不跳过注册」，
+     * 与本改动之前的行为一致。
+     */
+    @Autowired(required = false)
+    private IGb35114CertService gb35114CertService;
 
     /**
      * 启动流程里「对仍在有效期的平台发送注销」这一步是否已经结束。
@@ -402,9 +412,49 @@ public class PlatformServiceImpl implements IPlatformService {
         if (platform.isEnable()) {
             // 保存时启用就发送注册
             // 注册成功时由程序直接调用了online方法
-            sendRegister(platform, null);
+            if (canRegisterNow(platform)) {
+                sendRegister(platform, null);
+            } else {
+                log.info("[新增平台] {} GB35114 证书未配置，暂不注册，请在编辑页配置后保存",
+                        platform.getDeviceGBId());
+            }
         }
         return result > 0;
+    }
+
+    /**
+     * 新增上级时是否具备立刻发起注册的条件。
+     *
+     * <p>唯一的例外是 GB35114（{@code registerWay} 为 3/4）而<b>设备证书还没配</b>：
+     * 新增页不渲染证书槽（证书动作都要把「本上级的 id」写进引用列，而此刻 platform
+     * 还没有 id），所以此时发注册必然失败 ——
+     * {@code SIPCommanderForPlatform} 进入国密分支后
+     * {@code uacStateMachine} 返回 null，随后抛
+     * {@code SipException("GB35114 device certificate not configured")}。
+     * 与其白抛一次异常刷错误日志，不如跳过，提示用户去编辑页配好证书再保存。
+     *
+     * <p>判据与 {@code uacStateMachine} 的取值口径一致：它返回 null 的唯一原因就是
+     * {@code loadDeviceIdentity} 拿不到设备证书，即 {@code device_cert_id} 为空且按
+     * 上级国标编码也解析不到「客户端证书（本平台）」。上级平台证书缺失不在此列 ——
+     * 它只影响 sign2 的验签，不影响首包宣告 Capability。
+     *
+     * <p>编辑页保存（{@link #update}）不走这里：那时证书已配好，正常注册。
+     */
+    private boolean canRegisterNow(Platform platform) {
+        if (platform.getRegisterWay() != 3 && platform.getRegisterWay() != 4) {
+            return true;
+        }
+        if (gb35114CertService == null) {
+            // GB35114 模块缺席，无从判断，维持原有行为
+            return true;
+        }
+        if (platform.getDeviceCertId() != null) {
+            return true;
+        }
+        // 这里要传的是「本平台向上注册的国标编码」，即 deviceGBId —— 与
+        // SIPCommanderForPlatform 调用 uacStateMachine(deviceGBId, serverGBId, ...) 的
+        // 第一个参数一致；DEVICE_IDENTITY 证书的 gb_id 存的就是这个值。
+        return gb35114CertService.queryDeviceIdentity(platform.getDeviceGBId()) != null;
     }
 
 
@@ -896,11 +946,47 @@ public class PlatformServiceImpl implements IPlatformService {
 
             subscribeHolder.removeCatalogSubscribe(platform.getServerGBId());
             subscribeHolder.removeMobilePositionSubscribe(platform.getServerGBId());
+
+            // 级联平台删了，它绑的那两张 GB35114 证书也就没有归属了，一并删除。
+            // 必须在 platformMapper.delete 之后：反过来的话 assertNoCertReference 会把
+            // 本行算成「仍被引用」而拒绝，每张都删不掉，而删平台看起来还「成功」了。
+            deleteBoundGb35114Certs(platform);
         }catch (Exception e) {
             throw new ControllerException(ErrorCode.ERROR100.getCode(), e.getMessage());
         }
 
         return true;
+    }
+
+    /**
+     * 删除级联平台时，连带删除它绑定的 GB35114 证书（设备证书 / 上级平台证书）。
+     *
+     * <p>逐张删除，任何一张删不掉都<b>只记日志、不让删平台失败</b>：存量数据里可能两个
+     * 上级指向同一张证书，先删的那个平台会因「仍被别的平台引用」被守卫拒绝 ——
+     * 这是正确的判定，但不该把「删平台」这个已经成功的动作也一起回滚。
+     *
+     * <p>CA 不在此列：CA 是全局的，不随任何级联平台删除。
+     */
+    private void deleteBoundGb35114Certs(Platform platform) {
+        if (gb35114CertService == null) {
+            // GB35114 模块缺席，无证书可删
+            return;
+        }
+        Integer deviceCertId = platform.getDeviceCertId();
+        Integer platformCertId = platform.getPlatformCertId();
+        for (Integer certId : new Integer[]{deviceCertId, platformCertId}) {
+            if (certId == null) {
+                continue;
+            }
+            try {
+                gb35114CertService.deleteCert(certId);
+                log.info("[删除平台] 已连带删除 GB35114 证书 #{}（{}/{}）",
+                        certId, platform.getName(), platform.getServerGBId());
+            } catch (Exception e) {
+                log.warn("[删除平台] 连带删除 GB35114 证书 #{} 失败，已跳过（{}/{}）：{}",
+                        certId, platform.getName(), platform.getServerGBId(), e.getMessage());
+            }
+        }
     }
 
     @Override

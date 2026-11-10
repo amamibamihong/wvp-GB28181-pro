@@ -35,7 +35,7 @@
 ### 2.2 ⚠️ 这是**分阶段幂等迁移脚本**，不是一次性建表脚本
 
 脚本开头的 `CREATE TABLE IF NOT EXISTS` 只覆盖最初的表形态，
-**线上实际使用的列（`purpose` / `subject_dn` / `is_default` / `key_fingerprint` 等）
+**线上实际使用的列（`type` / `subject_dn` / `key_fingerprint` 等）
 是后续若干段存储过程通过 `ALTER TABLE ... ADD` 补上的**。
 
 因此：
@@ -52,15 +52,22 @@
 |---|---|
 | ① | 建 `wvp_gb35114_ca` / `wvp_gb35114_cert` 基础表；`wvp_device` 加 `register_way` / `cert_id`；`wvp_platform` 加 `device_cert_id` / `platform_cert_id` |
 | ② | 证书表加 `purpose` / `subject_dn` / DN 各段 / `csr_pem` / `remark` / `validity_days` / `key_usage`；CA 表加 `purpose` / `remark`；建索引 `idx_gb35114_cert_purpose`；**存量数据启发式归类**（按已有列推断 `purpose`） |
-| ③ | 证书表加 `is_default`；`wvp_device` 加 `server_cert_id`；初始化默认服务端证书 |
-| ④ | 证书表加 `key_fingerprint` + 索引 |
-| ⑤ | **删除 CA 表的 `name` 列**（CA 别名已废弃，身份改用证书主题 CN） |
+| ③ | **`purpose` → `type` 合并**：先 `DROP` 冗余的整数 `type`（1-服务器 / 2-设备），再把 `purpose` 改名为 `type`，重建两个索引；CA 表的 `purpose` 同步改名。**顺序不可颠倒**，详见下 |
+| ④ | `wvp_device` 加 `server_cert_id`；**删除证书表的 `is_default` 列**（服务端证书已由后端强制唯一，不再需要"默认"标记） |
+| ⑤ | 证书表加 `key_fingerprint` + 索引 |
+| ⑥ | **删除 CA 表的 `name` 列**（CA 别名已废弃，身份改用证书主题 CN） |
+
+> **阶段 ③ 为什么必须排在阶段 ② 之后、其余引用之前**：
+> 存量数据的启发式归类（阶段 ②）靠的是整数 `type` 的 `1`/`2` 推断用途，
+> 改完名就无从推断；而本文件其余所有段落写列名时用的都已是 `type`。
+> 阶段 ③ 自身是幂等的（仅在 `purpose` 还在时执行），新装库建表时就是 `type varchar`，
+> 整段跳过。
 
 > **从零部署**：先执行 `初始化-mysql-2.7.4.sql`（或对应数据库的初始化脚本）建好 wvp 全量表，
 > 再执行本脚本。
 >
-> **已有 GB35114 旧版本升级**：直接执行本脚本即可，阶段 ②③④ 的 `ALTER` 会补齐新列，
-> 存量证书的 `purpose` 会被自动推断。
+> **已有 GB35114 旧版本升级**：直接执行本脚本即可，阶段 ②～⑥ 的 `ALTER` 会补齐新列、
+> 完成 `purpose` → `type` 改名；存量证书的类型会被自动推断。
 
 ### 2.3 执行
 
@@ -80,19 +87,25 @@ mysql -h127.0.0.1 -P3306 -uroot -p -D wvp < 数据库/2.7.4/更新-gb35114-mysql
 gb35114:
   # [可选] 国密总开关，默认 false（关闭不影响原有 GB28181 Digest 注册）
   enabled: false
-  # [可选] 本平台作为下级向上级平台注册时使用的设备证书ID（关联 wvp_gb35114_cert.id）
-  # 为空时无法进行 UAC 侧国密注册（向上级注册仍走 Digest）
-  # device-cert-id:
-  # [可选] 本平台作为平台（UAS）使用的服务器证书ID，配置后注册方式为双向（Bidirection）
-  # server-cert-id:
-  # [可选] 本平台受信的上级平台证书ID（UAC 侧验 sign2，双向时使用）
-  # platform-cert-id:
+  # 用哪张证书不由本文件指定：证书全部存在 wvp_gb35114_cert 表里，运行时按类型从库中解析
+  # （服务端证书取唯一的一张；下级接入多个上级时按上级国标编码区分）。
+  # 在配置文件里写证书 ID，证书一旦重建（主键自增不回退）就会变成悬空引用，且只在注册时才暴露。
   # [可选] 私钥落地加密的对称密钥（至少 16 字节），生产环境务必修改
   key-encrypt-password: wvp-gb35114-default
   # [可选] 证书默认有效期（天）
   cert-validity-days: 3650
-  # [可选] 是否拒绝已过期的证书，默认 false（过期只在页面标出，不拦截注册；吊销始终拒绝）
+  # [可选] 是否拒绝已过期的证书，默认 false（过期只在页面标出，不拦截注册；已吊销记录始终拒绝）
   reject-expired-cert: false
+  # [可选] 本平台作下级（UAC）时是否校验上级证书链，默认 true（校验）
+  # 上级证书的签发 CA 必须已导入「CA 证书管理 · 受信任的 CA 证书」，
+  # 自签的上级证书要把该证书本身也导入那一栏，否则级联注册被拒。
+  # 不校验就置 false —— 只关上级方向；本平台作上级（UAS）时对设备证书的链校验恒开，不受本项控制。
+  verify-upstream-cert-chain: true
+  # [可选] 是否跳过证书链签名验证，默认 false（验证）。
+  # 拿不到 CA 时的逃生口：上级只发一张证书不给 CA、设备证书的 CA 不外流等。
+  # 置 true 后不再要求「由已导入的 CA 签发」，但指纹反查、有效期、握手验签都不受影响。
+  # 仅在确实拿不到 CA 时使用 —— 会降低对「证书被替换」的防护。
+  skip-cert-chain-verify: false
   # [可选] 目录同步前等待的毫秒数，规避国密握手与查询之间的时序竞争，0 表示不等待
   # sync-delay-ms: 0
   # [可选] 控制信令 Note 认证参数
@@ -108,27 +121,73 @@ gb35114:
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `false` | 国密总开关。**关闭时整套 GB35114 逻辑短路**，不影响原有 Digest 注册 |
-| `device-cert-id` | 空 | UAC 侧签 `sign1` 用的本地客户端证书。为空时向上级注册走 Digest |
-| `server-cert-id` | 空 | UAS 侧签 `sign2` 用的本地服务端证书。不配则取证书表中 `is_default=1` 的那张 |
-| `platform-cert-id` | 空 | UAC 侧验 `sign2` 用的上级服务端证书 |
 | `key-encrypt-password` | `wvp-gb35114-default` | **私钥落地加密密钥，生产环境必须改**。改它不会自动重加密已有私钥 |
 | `cert-validity-days` | `3650` | 签发证书时的默认有效期 |
 | `reject-expired-cert` | `false` | **过期是否拒绝注册**。默认 false：过期只在页面标出，不拦截；置 true 则按日期硬拒绝 |
+| `verify-upstream-cert-chain` | `true` | **本平台作下级（UAC）时是否校验上级证书链**。默认校验：上级证书的签发 CA 必须已导入「CA 证书管理 · 受信任的 CA 证书」（自签的上级证书把它本身导入一份），否则级联注册被拒。置 `false` 即放宽，**只关上级方向**。本平台作上级（UAS）时对设备证书的链校验**恒开**，不受本项影响 |
+| `skip-cert-chain-verify` | `false` | **全局跳过证书链签名验证**。拿不到 CA 时的逃生口（见下），两个方向的链校验都受影响。**不影响**指纹反查、有效期、握手 SM2 验签 |
 | `sync-delay-ms` | `0` | 设备回 200 OK 后还要解密 cryptkey、装载 VKEK，紧接着到达的查询会被按"密钥未就绪"拒绝（403）。留余量可让设备先完成握手收尾 |
 | `note.enabled` | `true` | 关掉后既不加签也不验签，用于判定"对端 4xx 是否由 Note 引起" |
 | `note.vkek-form` | `raw` | 标准未规定 VKEK 在摘要里的文本形式，各厂商实现不一。现场可逐项切换二分定位 |
 
-> **`reject-expired-cert` 为什么默认 false**：A 级握手不校验证书链与有效期，
-> 一张刚过期几小时的证书在协议上仍然可用。按日期硬拒绝会让设备在运维还没反应过来时
-> 就被挡在门外，且现场只能翻日志才看得出原因。需要严格合规的部署再置为 `true`。
+> **`reject-expired-cert` 为什么默认 false**：一张刚过期几小时的证书在协议上仍然可用，
+> 按日期硬拒绝会让设备在运维还没反应过来时就被挡在门外，且现场只能翻日志才看得出原因。
+> 需要严格合规的部署再置为 `true`。
 >
-> **吊销不受此开关影响** —— 任何取值下都拒绝。
+> **已吊销的记录不受此开关影响** —— 命中 `revoked` 即拒绝，任何取值下都是；
+> 界面上的「删除」同样绕不过（查不到记录也拒绝）。
 
-> **`device-cert-id` / `server-cert-id` / `platform-cert-id` 是"全局兜底"**：
-> 级联可各自在编辑页绑定（`wvp_platform.device_cert_id` / `platform_cert_id`），
-> 设备可绑定信任的服务端证书（`wvp_device.server_cert_id`）。
-> 优先级：**设备级绑定 > 全局配置 > 证书表默认证书**。
-> 多上级场景建议在级联编辑页逐条绑定，不要只依赖全局配置。
+> **`verify-upstream-cert-chain` 为什么默认 true**：GB/T 43026—2023 附录 B 表 B.1 里
+> 「需验证证书链是否正确」只出现在序号 3/6/7（7.2、7.4 设备身份认证），序号 8/9
+> （7.5 上联/下联）的备注列是空的 —— 标准对**平台间**认证没有链校验**要求**。
+> 但"没有要求"不等于"应当关掉"：关掉它意味着任意一张证书都能冒充上级，
+> 默认从严、需要时显式放宽更符合检测现场的口径。
+>
+> 放宽的两条路，**优先用前一条**：
+>
+> | 情形 | 用什么 | 影响面 |
+> |---|---|---|
+> | 只有上级方向拿不到 CA | 本项置 `false` | 只关上级方向，设备方向照旧恒开 |
+> | 上级与设备两个方向都拿不到 CA | `skip-cert-chain-verify: true` | 全局，两个方向一起放行 |
+>
+> 现场「受信任的 CA」与「上级证书」常常是**同一张自签证书**（上级只发一张，要求下级既当
+> 服务端证书导入、又当 CA 导入）。自签证书走的是「受信任的 CA 列表里存在与它同公钥的一条」
+> 这条判据，所以**把该证书本身在「受信任的 CA 证书」里也导入一份即可**，不必真去要一张独立 CA。
+>
+> **本平台作为上级（UAS）时不受本项控制**：对设备证书的链校验恒开 —— 7.4 的
+> 「需验证证书链是否正确」是必测项。第三方机构签发给下级设备的证书，把签发它的 CA
+> 导入「受信任的 CA 证书」即可通过，**与本项取值无关**。
+
+> **`skip-cert-chain-verify` 为什么需要存在**：现场有一种**无解**的情况 —— CA 根本拿不到。
+> 上级只发一张证书、不给签发它的 CA；设备证书由厂商工具签发，CA 不外流；或 CA 已停用/丢失。
+> 此时链校验会让设备或级联平台**全部无法接入**，而本平台没有任何办法自行补出那张 CA。
+> 本项提供一个显式的全局逃生口。
+>
+> **它关的是「证书链」，不是「签名」。** 置 `true` 后仍会照常校验：
+>
+> | 仍然校验 | 说明 |
+> |---|---|
+> | 设备证书**指纹反查** | 仍要求命中本平台 `ISSUED_DEVICE` 签发记录 |
+> | **吊销** | 命中 `revoked` 记录时任何取值下都拒绝 |
+> | **有效期** | 是否拒绝另由 `reject-expired-cert` 控制 |
+> | 握手 **SM2 验签**（`sign1`/`sign2`） | 协议层身份认证，与「证书由谁签发」是两件事 |
+>
+> 因此打开后**仍然无法冒充对端** —— 冒充需要对方的私钥。但信任依据退化为
+> 「本平台签发记录存在」（设备方向）与「对端自报的证书可直接使用」（上级方向），
+> 会降低对「证书被替换」的防护。**仅在确实拿不到 CA 时使用，并记录在案。**
+
+> **配置里没有 `device-cert-id` / `server-cert-id` / `platform-cert-id`**。
+> 曾经有过，但那是把数据库主键写死在 yml 里 —— 证书一旦重建（主键自增不回退）
+> 配置就指向不存在的行，且只在设备注册时才暴露。现在证书的存在与选择全由数据库承担：
+>
+> | 角色 | 解析规则 |
+> |---|---|
+> | 服务端证书（本平台）·UAS 签 `sign2` | 后端强制**唯一**（见 usage.md §2.2），未绑定设备的设备直接用这一张 |
+> | 客户端证书（本平台）·UAC 签 `sign1` | 不唯一（可接入多个上级）。按 `wvp_platform.device_cert_id` 绑定；未绑定时按上级国标编码匹配证书的 `gb_id`，只有一张则用它，多张则**拒绝猜测** |
+> | 服务端证书（上级平台）·UAC 验 `sign2` | 同上，对应 `wvp_platform.platform_cert_id` |
+> | 设备信任的服务端证书 | 按 `wvp_device.server_cert_id` 绑定；未绑定则用平台唯一的那张 |
+>
+> 多上级场景**务必在级联编辑页逐条绑定**，不要依赖兜底。
 
 ### 3.2 三处配置文件都要同步
 
@@ -151,16 +210,13 @@ Docker 版的环境变量名：
 
 ```
 WVP_GB35114_ENABLED
-WVP_GB35114_DEVICE_CERT_ID
-WVP_GB35114_SERVER_CERT_ID
-WVP_GB35114_PLATFORM_CERT_ID
 WVP_GB35114_KEY_PWD
 WVP_GB35114_CERT_VALIDITY_DAYS
 WVP_GB35114_REJECT_EXPIRED_CERT
 ```
 
-> Docker 版里 `device-cert-id` 等三项默认注释掉：空字符串绑定 `Integer` 会失败。
-> 需要时取消注释并填入 `wvp_gb35114_cert.id`。
+> Docker 版里 `gb35114:` 段同样不含证书 ID —— 证书全部从数据库解析，
+> 环境变量 `WVP_GB35114_*_CERT_ID` 也已随之取消。
 
 ---
 
@@ -200,16 +256,35 @@ mvn -o test -Dtest='Gb35114*'
 > ⚠️ `pom.xml` 里 `maven-surefire-plugin` 配了 `<skipTests>true</skipTests>`，
 > 上面这条命令**不会真的跑测试** —— 它只打印 `BUILD SUCCESS`，不产生
 > `target/surefire-reports/`。命令行加 `-DskipTests=false` **也覆盖不了**
-> （实测无效，pom 里的配置优先）。
-> 要真跑，临时把那一行改成 `<skipTests>false</skipTests>`，跑完改回来；
-> 或者直接跑 `mvn -o surefire:test -Dtest='Gb35114*'` 前先确认报告目录里确实出现了
-> `Tests run:` 行 —— 没出现就是没跑。
+> （实测无效，pom 里的配置优先）。改 pom 也不推荐（会污染提交）；
+> 实际做法是绕过 surefire，用 JUnit Platform 启动器直接选类跑：
+>
+> ```bash
+> # 一次性编译出启动器与依赖清单（/tmp/wvptest/cp.txt 是 mvn dependency:build-classpath 的产物）
+> CLASSES=$(cd target/test-classes && find . -path "*gb35114*" -name "*Test.class" \
+>   ! -name "*\$*" | sed 's|^\./||; s|\.class$||; s|/|.|g' | sort | tr '\n' ' ')
+> java -cp "/tmp/wvptest:$(cat /tmp/wvptest/cp.txt)" RunTests ${=CLASSES}
+> ```
+>
+> ⚠️ 当前 shell 是 **zsh**，不会对未加引号的变量做分词，必须写 `${=CLASSES}`；
+> 写成 `$CLASSES` 会把 19 个类名当成一个类名，报 `ClassNotFoundException`。
+> 另外 `RunTests` 不传参时发现 0 个用例（只按参数选类，不做包扫描），
+> 且 `mvn clean package` 会清掉 `target/test-classes`，打包后要重新 `mvn -o test-compile`。
 
-6 个测试类共 34 个用例，覆盖：证书密钥复用（`Gb35114CertUtilKeyReuseTest`）、
+19 个测试类共 162 个用例，覆盖：证书密钥复用（`Gb35114CertUtilKeyReuseTest`）、
 SIP 头构造与解析（`Gb35114HeaderUtilTest`）、401 挑战头 golden 值
 （`Gb35114ChallengeGoldenTest`）、SM2/SM3/VKEK 封装（`Gb35114SmCryptoTest`）、
 UAS/UAC 握手状态机（`Gb35114StateMachineTest`）、签发者反查
-（`Gb35114IssuerResolveTest`）。
+（`Gb35114IssuerResolveTest` / `Gb35114IssuerResolveServiceTest`）、
+证书链校验（`Gb35114CertChainTest` / `Gb35114CertChainServiceTest`）、
+设备证书 CN 格式（`Gb35114DeviceCnServiceTest`）、CA 主题 DN 落库
+（`Gb35114CaSubjectServiceTest`）、删除证书的引用守卫
+（`Gb35114CertReferenceGuardTest`）、链校验跳过与签发者 DN 快速映射
+（`Gb35114CertChainSkipAndDnNarrowTest`）、UAC/UAS 外壳与回环
+（`Gb35114UacChainHookTest` / `Gb35114UacLoopbackTest` / `Gb35114UasLoopbackTest`）、
+CA 管理（`Gb35114CaManagementTest`）、服务端证书的 CSR 路径
+（`Gb35114ServerCsrServiceTest`）、受信任 CA 签发的设备证书
+（`Gb35114TrustedCaDeviceCertTest`）。
 
 ---
 

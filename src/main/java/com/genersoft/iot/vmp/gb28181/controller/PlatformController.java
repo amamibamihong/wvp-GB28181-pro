@@ -10,6 +10,7 @@ import com.genersoft.iot.vmp.gb28181.bean.SubscribeHolder;
 import com.genersoft.iot.vmp.gb28181.controller.bean.UpdateChannelParam;
 import com.genersoft.iot.vmp.gb28181.service.IPlatformChannelService;
 import com.genersoft.iot.vmp.gb28181.service.IPlatformService;
+import com.genersoft.iot.vmp.gb35114.sip.Gb35114VkekPeriod;
 import com.genersoft.iot.vmp.utils.DateUtil;
 import com.genersoft.iot.vmp.vmanager.bean.ErrorCode;
 import com.genersoft.iot.vmp.vmanager.bean.WVPResult;
@@ -105,6 +106,7 @@ public class PlatformController {
         if (platform.getExpires() <= 0) {
             platform.setExpires(3600);
         }
+        clampVkekPeriod(platform);
 
         if (platform.getKeepTimeout() <= 0) {
             platform.setKeepTimeout(60);
@@ -149,7 +151,31 @@ public class PlatformController {
         ) {
             throw new ControllerException(ErrorCode.ERROR400);
         }
+        clampVkekPeriod(parentPlatform);
         platformService.update(parentPlatform);
+    }
+
+    /**
+     * 把上级平台的注册周期钳到 GB 35114—2017 6.14.3 的 1 天上限内。
+     *
+     * <p>只对国密接入（{@code registerWay} 为 3/4）生效 —— 普通 Digest 级联没有 VKEK，
+     * 注册周期与 6.14.3 无关，不该被这条改变行为。
+     *
+     * <p>在 Controller 而不是前端校验：前端可以被绕过，而这是协议硬指标。
+     */
+    private void clampVkekPeriod(Platform platform) {
+        int registerWay = platform.getRegisterWay();
+        if (registerWay != 3 && registerWay != 4) {
+            return;
+        }
+        int requested = platform.getExpires();
+        int clamped = Gb35114VkekPeriod.clamp(requested);
+        if (clamped != requested) {
+            log.warn("[国标级联] 上级 {} 配置的注册周期 {}s 超过 GB 35114—2017 6.14.3 的"
+                            + "1 天上限，已改为 {}s；该值同时是 VKEK 更新周期，超限不合规",
+                    platform.getServerGBId(), requested, clamped);
+            platform.setExpires(clamped);
+        }
     }
 
     @Operation(summary = "删除上级平台", security = @SecurityRequirement(name = JwtUtils.HEADER))

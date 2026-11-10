@@ -11,7 +11,7 @@ import java.util.List;
 /**
  * GB35114 证书管理服务。
  *
- * <p>证书按用途（{@link Gb35114Cert#getPurpose()}）区分，私钥只在本平台自持身份的证书上存在，
+ * <p>证书按类型（{@link Gb35114Cert#getType()}）区分，私钥只在本平台自持身份的证书上存在，
  * 且永不通过接口下发。
  */
 public interface IGb35114CertService {
@@ -21,86 +21,124 @@ public interface IGb35114CertService {
     // ------------------------------------------------------------------
 
     /**
-     * 生成本地自签根 CA（purpose=LOCAL_CA）。
+     * 生成本地自签根 CA（type=LOCAL_CA）。
      *
      * <p><b>本地 CA 全局只保留一份</b>：已存在 LOCAL_CA 时直接拒绝，需先删除旧的
-     * （{@link #deleteCa(int)} 会校验引用，仍被证书引用的删不掉）。上级 CA
-     * （purpose=TRUSTED_CA）不受此限制，多个上级平台各一份。
+     * （{@link #deleteCa(int)} 会校验引用，仍被证书引用的删不掉）。受信任的 CA
+     * （type=TRUSTED_CA）不受此限制，多个上级平台各一份，第三方签发机构也可能不止一家。
      *
      * <p>CA 没有独立的「名称」字段：它的身份就是证书的主题 CN，取自生成参数或证书本身，
      * 不由调用方另起别名 —— 否则同一张 CA 会在页面上出现两个都像名字的字段。
+     *
+     * <p>{@code profile} 提供 CN 与 DN 各段（C/ST/L/O/OU），与其它证书创建入口一致；
+     * {@code validityDays} 不传或非正数时回退到 {@code gb35114.cert-validity-days}。
+     * 落库的各段一律由签出的证书反解析得到，不采信表单原值。
      */
-    Gb35114Ca generateCa(String subjectCn, String remark);
+    Gb35114Ca generateCa(Gb35114Ca profile, int validityDays);
 
     /**
-     * 导入外部 CA。purpose=LOCAL_CA 需带私钥；purpose=TRUSTED_CA 仅证书。
+     * 导入外部 CA。type=LOCAL_CA 需带私钥；type=TRUSTED_CA 仅证书。
      *
      * <p>导入 LOCAL_CA 等价于新建，同样受「本地 CA 只保留一份」约束。
      */
-    Gb35114Ca importCa(String purpose, String certPem, String keyPem, String remark);
+    Gb35114Ca importCa(String type, String certPem, String keyPem, String remark);
 
     /** 查询全部 CA（不含私钥密文）；TRUSTED_CA 附带其服务的上级平台名（瞬态）。 */
     List<Gb35114Ca> queryAllCa();
 
-    /** 按用途查询 CA；TRUSTED_CA 附带其服务的上级平台名（瞬态）。 */
-    List<Gb35114Ca> queryCaByPurpose(String purpose);
+    /** 按类型查询 CA；TRUSTED_CA 附带其服务的上级平台名（瞬态）。 */
+    List<Gb35114Ca> queryCaByType(String type);
 
     /** 按 ID 查询 CA 全列（含私钥密文），供下载证书/内部签发用，禁止直接返回前端。 */
     Gb35114Ca queryCa(int id);
 
-    /** 删除 CA；被证书引用时拒绝。 */
+    /**
+     * 查询某 CA 签发的证书清单（CA 页面点开「关联证书」用）。
+     *
+     * <p>列表接口只返回 {@code certCount} 一个数，清单按需单独拉 —— CA 多、证书多时
+     * 把清单塞进列表响应会把响应撑大，而多数时候用户只看张数。
+     */
+    List<Gb35114Cert> queryCertsByCaId(int caId);
+
+    /** 删除 CA；被证书引用时拒绝，并在信息里点名是哪些证书在占位。 */
     void deleteCa(int id);
 
     // ------------------------------------------------------------------
     // 本地身份证书：本平台生成密钥对，私钥加密留存本地
     //
-    // 服务端证书（SERVER_IDENTITY）全局只保留一组密钥对：设备侧只存得下一把公钥，
-    // 多组并存时「设备绑定的是哪一组」无从判断，选错会让设备验 sign2 失败而平台日志正常。
-    // 因此下面三个「新建密钥对」的入口在已存在未吊销的 SERVER_IDENTITY 时一律拒绝，
-    // 正常换发请用 reissueServerIdentity（复用密钥对）。
-    // 密钥泄露等应急场景：先吊销该组全部证书，守卫即失效，可干净地新建第二组。
+    // 服务端证书（SERVER_IDENTITY）有三条创建路径，签发的都是本平台（本地根 CA 或自签）：
+    //   1) createServerIdentity —— 一步创建：生成密钥对并当场签发；
+    //   2) createPendingCsr → signPendingServerIdentity —— 先出 CSR，再由本平台签发；
+    //   3) importIdentityCert —— 导入外部工具签发的证书 + 私钥（回填）。
+    // 三条路都受同一条约束：全局只保留一组密钥对 —— 设备侧只存得下一把公钥，多组并存时
+    // 「设备绑定的是哪一组」无从判断，选错会让设备验 sign2 失败而平台日志正常。
+    // 已有服务端证书时创建一律被拒，换发路径是「先删除、再重新创建」：
+    // 新证书是新的密钥对，绑定过旧证书的设备必须重新导入平台证书才能注册。
+    //
+    // 客户端证书（DEVICE_IDENTITY）不能由本平台签发（见 requireLocallyIssuableType），
+    // 只能走 createPendingCsr → 导出交上级签发 → completePendingWithCert 回填。
     // ------------------------------------------------------------------
+
+    /**
+     * <b>一步创建服务端证书（本平台）</b>：生成 SM2 密钥对并当场签发。
+     *
+     * <p>这是服务端证书最省事的一条创建路径：三步并作一步。另外两条是
+     * {@link #createPendingCsr} + {@link #signPendingServerIdentity}（先出 CSR 再签）与
+     * {@link #importIdentityCert}（导入外部签发的证书）。签发方式由 {@code caId} 决定：
+     * <ul>
+     *   <li>{@code caId} 非空 —— 用该本地 CA 签发（CA 私钥须在本平台）；</li>
+     *   <li>{@code caId} 为空 —— 自签（签发者即自身，无 CA 的联调环境可用）。</li>
+     * </ul>
+     * 两条路径都不建 CA 层级、都不需要外部参与，因此一次调用即可拿到可用证书。
+     *
+     * <p>仅限<b>服务端证书（本平台）</b>：本平台作 UAS 用它签 sign2，设备侧只需要拿到公钥，
+     * 谁签的、是不是自签都不影响验签。客户端证书必须由上级签发 —— 调用会拒绝。
+     *
+     * <p>受「服务端只保留一组密钥对」约束：已有服务端证书（未删除）时拒绝。
+     *
+     * @param caId 签发 CA；为 {@code null} 时自签
+     */
+    Gb35114Cert createServerIdentity(Gb35114Cert profile, Integer caId, int validityDays);
 
     /**
      * 创建待签发记录：生成 SM2 密钥对与 CSR，<b>私钥加密后与 CSR 存在同一条记录</b>，
      * 证书列留空，等待签发。返回记录含 id 与 csrPem。
      *
-     * <p>用途为 SERVER_IDENTITY 时受「服务端只保留一组密钥对」约束，已有未吊销的
-     * 服务端证书时会被拒绝。
+     * <p>服务端证书（本平台）与客户端证书（本平台）都走这条路，区别在签发者：
+     * <ul>
+     *   <li>服务端证书 —— 用 {@link #signPendingServerIdentity} 由本平台签发（本地根 CA 或自签），
+     *       也可用 {@link #completePendingWithCert} 回填外部签发的证书；</li>
+     *   <li>客户端证书 —— 只能把 CSR 交给上级签发，再 {@link #completePendingWithCert} 回填
+     *       （本平台签的证书上级那边没有记录，接入必被拒）。</li>
+     * </ul>
+     *
+     * <p>类型为 SERVER_IDENTITY 时受「服务端只保留一组密钥对」约束。
      */
     Gb35114Cert createPendingCsr(Gb35114Cert profile, int validityDays);
 
     /**
-     * 用本平台 CA 签发待签发记录（复用记录中的私钥对应公钥，只回填证书）。
+     * 用本平台签发待签发的服务端证书（本地根 CA 签发或自签），原地回填该记录。
      *
-     * <p>仅限<b>本地服务端证书</b>。客户端证书要交给上级验 sign1，靠「上级自己签发过」
-     * 才被信任，本地 CA 签的上级不认 —— 调用会拒绝。
+     * <p>与 {@link #completePendingWithCert} 并列：那条回填外部签发的证书，这条在本平台内完成。
+     * {@code caId} 为空即自签。只接受 SERVER_IDENTITY —— 客户端证书必须由上级签发。
      */
-    Gb35114Cert signPendingByCa(int certId, int caId, int validityDays);
+    Gb35114Cert signPendingServerIdentity(int certId, Integer caId, int validityDays);
 
     /** 用外部 CA 返回的证书回填待签发记录；校验证书公钥与本地私钥匹配。 */
     Gb35114Cert completePendingWithCert(int certId, String certPem);
 
     /**
-     * 生成本平台自签身份证书（不建 CA 层级，仅调试/无 CA 场景）。
-     *
-     * <p>仅限<b>本地服务端证书</b>。客户端证书必须由上级签发 —— 调用会拒绝。
-     * 同样受「服务端只保留一组密钥对」约束。
-     */
-    Gb35114Cert generateSelfSigned(Gb35114Cert profile, int validityDays);
-
-    /**
      * 导入本平台身份证书（证书 + 私钥，校验配对）。
      *
-     * <p>用途为 SERVER_IDENTITY 时受「服务端只保留一组密钥对」约束。
+     * <p>类型为 SERVER_IDENTITY 时受「服务端只保留一组密钥对」约束。
      */
     Gb35114Cert importIdentityCert(Gb35114Cert profile, String certPem, String keyPem);
 
     // ------------------------------------------------------------------
-    // 下级客户端证书：只做 CA 签发，私钥不在本平台
+    // 客户端证书（下级设备）：只做 CA 签发，私钥不在本平台
     // ------------------------------------------------------------------
 
-    /** 用下级提交的 CSR 签发证书（purpose 固定 ISSUED_DEVICE，不落私钥）。 */
+    /** 用下级提交的 CSR 签发证书（type 固定 ISSUED_DEVICE，不落私钥）。 */
     /**
      * 由下级提交的 CSR 签发证书（私钥始终留在下级）。
      *
@@ -133,8 +171,8 @@ public interface IGb35114CertService {
     /** 查询全部证书（列表列，含 hasKey，不含私钥密文）。 */
     List<Gb35114Cert> queryAllCerts();
 
-    /** 按用途查询证书（列表列）。 */
-    List<Gb35114Cert> queryCertsByPurpose(String purpose);
+    /** 按类型查询证书（列表列）。 */
+    List<Gb35114Cert> queryCertsByType(String type);
 
     /** 按 ID 查询证书（列表列）。 */
     Gb35114Cert queryCert(int id);
@@ -143,14 +181,14 @@ public interface IGb35114CertService {
     List<Gb35114Cert> queryByGbId(String gbId);
 
     /**
-     * UAS 侧验 sign1 用：按国标 ID 取有效的「下级客户端证书」。
-     * 用途不符、已吊销的均返回 {@code null}；<b>已过期</b>的按
+     * UAS 侧验 sign1 用：按国标 ID 取有效的「客户端证书（下级设备）」。
+     * 类型不符、已吊销的均返回 {@code null}；<b>已过期</b>的按
      * {@code gb35114.reject-expired-cert} 决定（默认不拒绝，优先返回未过期的那张）。
      */
     Gb35114Cert queryIssuedDeviceCert(String gbId);
 
     /**
-     * 取本平台当前可用的「本地服务端证书」（SERVER_IDENTITY，持有私钥、未吊销；过期与否
+     * 取本平台当前可用的「服务端证书（本平台）」（SERVER_IDENTITY，持有私钥、未吊销；过期与否
      * 取决于 {@code gb35114.reject-expired-cert}）。用于未显式配置
      * {@code gb35114.server-cert-id} 时自动确定 UAS 签名身份。
      */
@@ -163,23 +201,18 @@ public interface IGb35114CertService {
      * 等于悄悄换掉设备信任的公钥，设备验 sign2 必然失败，而平台日志上一切正常 ——
      * 故障点会漂到设备侧。因此本方法<b>绝不跨密钥组回退</b>。
      *
-     * <p>「多个证书」只允许是<b>同一密钥组内的多张</b>（有效期/签发者/序列号不同），
-     * 它们对设备完全等价。锚点优先取 {@code is_default=1} 的那张（运维对设备的承诺），
-     * 从未标记过默认时取最新的一张，再在锚点所在组内解析可用证书。
+     * <p>锚点取该类型下最新的一张记录，再在锚点所在组内解析可用证书 ——
+     * 存量环境可能因早期版本留有同密钥对的多张证书，它们对设备完全等价。
      *
-     * @return 可用的服务端证书；锚点已吊销、或其所在组内已无可用证书时返回 {@code null}
+     * @return 可用的服务端证书；锚点不可用、或其所在组内已无可用证书时返回 {@code null}
      */
     Gb35114Cert queryDefaultServerIdentity();
 
     /**
-     * 取「被显式标记为默认」的那张服务端证书原始记录，<b>不判断是否可用</b>。
-     *
-     * <p>与 {@link #queryDefaultServerIdentity()} 的区别：后者会跳过不可用的证书顺延到
-     * 下一张（可能是另一把密钥对），而签名身份的选择不能这么顺延 —— 设备存的是被标记
-     * 默认那张的公钥。调用方拿到本方法的记录后，可据此判断「承诺的证书是否还有效」，
-     * 并在同公钥指纹范围内寻找接替者。无标记时返回 {@code null}。
+     * 取指定 ID 的服务端证书，校验其确实可用（类型为 SERVER_IDENTITY、持有私钥、
+     * 未吊销、未过期）。不可用时返回 {@code null}。
      */
-    Gb35114Cert queryMarkedDefaultServerIdentity();
+    Gb35114Cert queryUsableServerIdentity(Integer certId);
 
     /**
      * 按「<b>密钥组</b>」解析可用的服务端证书。
@@ -187,42 +220,41 @@ public interface IGb35114CertService {
      * <p>签名身份的本质是<b>密钥对</b>而非证书：同一密钥对签出的多张证书（有效期不同、
      * 签发者不同、序列号不同）对设备完全等价 —— 设备只存公钥，用组内任意一张的私钥
      * 签名都能被验过。因此给定证书过期时，只要同组还有可用证书就继续用它，
-     * 设备无需重新配置。这正是「生成多张有效期不同的服务端证书供不同客户端使用」的
-     * 落地依据：客户端拿到的是哪一张不重要，重要的是它们共用同一个公钥。
+     * 设备无需重新配置。
      *
      * <p>但<b>吊销不参与这个顺延</b>：吊销是对该签名身份「停用」的明确指令。同组证书
      * 共用私钥，一旦泄露必然整组一起吊销；若还能顺延到兄弟证书，吊销就形同虚设。
      *
-     * @return 可用的证书；给定证书已吊销、用途不符、不存在，或同组内也无可用证书时返回 null
+     * @return 可用的证书；给定证书已吊销、类型不符、不存在，或同组内也无可用证书时返回 null
      */
     Gb35114Cert resolveUsableServerIdentity(int certId);
 
     /**
-     * 取指定 ID 的服务端证书，校验其确实可用（用途为 SERVER_IDENTITY、持有私钥、
-     * 未吊销、未过期）。不可用时返回 {@code null}。
+     * 解析本平台作为下级注册时使用的「客户端证书（本平台）」（DEVICE_IDENTITY）。
+     *
+     * <p><b>该类型不唯一</b>：本平台可以同时接入多个上级，每个上级用自己的那张
+     * （证书里 CN 通常就是本平台在该上级处的国标编码）。因此解析规则是：
+     * <ol>
+     *   <li>{@code gbId} 非空时，先按 {@code gb_id} 精确匹配；</li>
+     *   <li>匹配不到（或 gbId 为空）时，若该类型下<b>只有一张</b>未吊销的证书，就用它；</li>
+     *   <li>仍有多张 —— <b>返回 null 并告警，绝不猜</b>。猜错等于用别的上级的身份去注册，
+     *       对方验签失败，而本平台日志上一切正常。</li>
+     * </ol>
+     *
+     * @param gbId 本平台向上注册的国标编码，可为 null
+     * @return 可用的证书；无候选或有歧义时返回 {@code null}
      */
-    Gb35114Cert queryUsableServerIdentity(Integer certId);
-
-    /** 把某张服务端证书设为默认（同一时刻全局仅一张）。 */
-    void setDefaultServerIdentity(int certId);
+    Gb35114Cert queryDeviceIdentity(String gbId);
 
     /**
-     * <b>复用现有密钥对</b>再签一张服务端证书：私钥不变，只重新签发证书。
+     * 解析某个上级平台的「服务端证书（上级平台）」（TRUSTED_PLATFORM，仅公钥，用于验 sign2）。
      *
-     * <p>新证书的公钥与源证书完全相同（{@link Gb35114Cert#getKeyFingerprint()} 一致），
-     * 因此设备侧<b>无需重新配置</b>：设备导入的是源证书或新证书中的任意一张，平台用
-     * 同组内任意一张的私钥签 sign2 都能被验过。用于延长有效期、更换 DN 或改由 CA 签发。
+     * <p>与 {@link #queryDeviceIdentity(String)} 同理：该类型也不唯一（多个上级各有各的），
+     * 按 {@code serverGbId} 匹配 {@code gb_id}；匹配不到且只有一张时用它；有多张则返回 null。
      *
-     * @param sourceCertId 提供密钥对的源服务端证书（必须有私钥）
-     * @param profile      新证书的档案（DN、国标 ID、备注等）
-     * @param caId         签发 CA，为 null 时自签
-     * @param validityDays 有效期天数（自签发起算）
+     * @param serverGbId 上级平台国标编码，可为 null
      */
-    Gb35114Cert reissueServerIdentity(int sourceCertId, Gb35114Cert profile,
-                                      Integer caId, int validityDays);
-
-    /** 按公钥指纹查询同组服务端证书（同一个签名身份）。 */
-    List<Gb35114Cert> queryServerIdentitiesByFingerprint(String keyFingerprint);
+    Gb35114Cert queryTrustedPlatformCert(String serverGbId);
 
     /** 加载证书 PEM 为 X509Certificate（不涉私钥）。 */
     X509Certificate loadCert(int id);
@@ -249,7 +281,47 @@ public interface IGb35114CertService {
     X509Certificate validateAnnouncedDeviceCert(String gbId, X509Certificate cert);
 
     /**
-     * 说明某设备为何取不到可用的下级客户端证书。
+     * UAS 侧：校验设备证书确实由本平台的 CA 签发（证书链校验）。
+     *
+     * <p>对齐 GB/T 43026—2023 附录 B 表 B.1 序号 6/7 的「需验证证书链是否正确」——
+     * 该要求只出现在 7.4（单向/双向设备身份认证），7.5（平台间）没有。
+     *
+     * <p><b>与 {@link #validateAnnouncedDeviceCert} 是叠加关系，不是替代</b>：指纹反查回答
+     * 「本平台是否给这把公钥签发过证书」，链校验回答「这张证书是不是本平台 CA 签出来的」。
+     * 只看指纹会漏掉一个真实漏洞 —— 设备拿自己的私钥自签一张证书，只要公钥与库里那张相同，
+     * 指纹就命中、记录也有效，于是被放行；补上链校验后，自签证书因验不过本平台 CA 的公钥而被拒。
+     *
+     * <p><b>本平台作为上级时恒开</b>，不受 {@code gb35114.verify-upstream-cert-chain} 控制
+     * （那个开关只管本平台作为下级时是否校验上级证书链）。
+     *
+     * <p>不校验有效期：到期是否拦截由 {@code gb35114.reject-expired-cert} 决定，
+     * 且该判定已在 {@link #validateAnnouncedDeviceCert} 中完成，此处重复只会产生两条含义重叠的日志。
+     *
+     * @param gbId         设备国标编码（仅用于拼装可读的失败信息）
+     * @param cert         设备自报的证书
+     * @param expectedCaId 签发记录上的 CA（可为 null：存量未回填，或证书由 {@link #importPeerCert} 导入）
+     * @return 校验通过的证书
+     * @throws Gb35114Exception 无法验证，或签发者不具备 CA 资格
+     */
+    X509Certificate validateDeviceCertChain(String gbId, X509Certificate cert, Integer expectedCaId);
+
+    /**
+     * UAC 侧：校验上级平台证书的链（本平台作为下级时）。
+     *
+     * <p>由 {@code gb35114.verify-upstream-cert-chain} 控制是否注入（默认注入 = 校验）。
+     * 标准对平台间认证（7.5）没有要求链校验，但默认仍从严；需要放宽的部署把该项置为
+     * {@code false}，即不注入。
+     *
+     * <p>自签的上级证书同样要求「该证书已作为受信任的 CA 导入一份」：否则开关在自签这个常态下
+     * 等于空操作，开了跟没开一样。本平台的信任仍来自「运维显式导入」这一动作。
+     *
+     * @return 校验通过的证书
+     * @throws Gb35114Exception 受信任的 CA 列表里找不到能签发它的证书
+     */
+    X509Certificate validateUpstreamPlatformCertChain(X509Certificate platformCert);
+
+    /**
+     * 说明某设备为何取不到可用的客户端证书（下级设备）。
      *
      * <p>{@link #queryIssuedDeviceCert(String)} 返回 {@code null} 有两种原因 ——
      * 「本平台没给这台设备签发过」和「签发过但已吊销/过期」，二者的处置完全不同
@@ -264,4 +336,33 @@ public interface IGb35114CertService {
 
     /** 删除证书（本地身份证书连同其私钥一并删除）。 */
     void deleteCert(int id);
+
+    /**
+     * 删除证书，并先解除<b>级联平台</b>对它的绑定。
+     *
+     * <p>用于「国标级联 → 编辑」页删除本上级绑定的证书：证书此刻仍被本 platform 行按 ID
+     * 引用，直接走 {@link #deleteCert(int)} 会被引用守卫拒绝。本方法先把
+     * {@code wvp_platform.device_cert_id} / {@code platform_cert_id} 中等于该 ID 的置空，
+     * 再执行删除。
+     *
+     * <p>只解绑级联平台，不动设备的绑定：设备侧那张证书与级联无关，擅自解绑会把一台
+     * 正常在用的设备弄成「未配置证书」。设备仍引用时，删除照旧被守卫拒绝并点名。
+     */
+    void unbindAndDeleteCert(int id);
+
+    /**
+     * 把某张证书绑定到某个级联平台（{@code certId} 为 null 表示解绑）。
+     *
+     * <p>国密接入下「本平台设备证书」与「上级平台证书」都是<b>按上级各一张</b>的，
+     * 因此这个归属必须显式记在 {@code wvp_platform} 上。没有它时，运行期只能靠
+     * {@link #queryDeviceIdentity(String)} 按国标 ID 反查兜底 —— 兜底在「只有一张候选」时
+     * 能用，接入第二个上级就会退化成「拒绝猜测、返回 null」，页面上也无从回显绑的是哪张。
+     *
+     * <p>只写绑定那一列，不整行更新 platform：见 {@code PlatformMapper.bindDeviceCert} 的说明。
+     *
+     * @param platformId 级联平台 ID
+     * @param type       证书类型，只接受 {@code DEVICE_IDENTITY} 与 {@code TRUSTED_PLATFORM}
+     * @param certId     证书 ID；null 表示解绑
+     */
+    void bindToPlatform(int platformId, String type, Integer certId);
 }

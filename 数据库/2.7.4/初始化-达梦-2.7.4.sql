@@ -60,6 +60,9 @@ CREATE TABLE wvp_device
     position_capability                 int,
     broadcast_push_after_ack            bit default 0,
     server_id                           varchar(50),
+    register_way                        int default 1,
+    cert_id                             int,
+    server_cert_id                      int,
     constraint uk_device_device unique (device_id)
 );
 COMMENT ON TABLE wvp_device IS '存储国标设备的基础信息及在线状态';
@@ -96,6 +99,9 @@ COMMENT ON COLUMN wvp_device.heart_beat_count IS '心跳失败次数';
 COMMENT ON COLUMN wvp_device.position_capability IS '定位能力标识';
 COMMENT ON COLUMN wvp_device.broadcast_push_after_ack IS 'ACK后是否自动推流';
 COMMENT ON COLUMN wvp_device.server_id IS '所属信令服务器ID';
+COMMENT ON COLUMN wvp_device.register_way IS '注册方式：1-摘要，3-证书双向，4-证书单向';
+COMMENT ON COLUMN wvp_device.cert_id IS '关联的国密证书ID（wvp_gb35114_cert.id）';
+COMMENT ON COLUMN wvp_device.server_cert_id IS '该设备信任的服务器证书ID（wvp_gb35114_cert.id，空则用平台唯一的那张服务端证书）';
 
 -- 记录各设备上报的报警信息
 DECLARE
@@ -487,6 +493,8 @@ CREATE TABLE wvp_platform
     auto_push_channel     bit default 1,
     send_stream_ip        varchar(50),
     server_id             varchar(50),
+    device_cert_id        int,
+    platform_cert_id      int,
     constraint uk_platform_unique_server_gb_id unique (server_gb_id)
 );
 COMMENT ON TABLE wvp_platform IS '上级国标平台注册信息';
@@ -525,6 +533,8 @@ COMMENT ON COLUMN wvp_platform.catalog_with_region IS '是否推送区域目录'
 COMMENT ON COLUMN wvp_platform.auto_push_channel IS '是否自动推送通道';
 COMMENT ON COLUMN wvp_platform.send_stream_ip IS '推流时使用的IP';
 COMMENT ON COLUMN wvp_platform.server_id IS '对应信令服务器ID';
+COMMENT ON COLUMN wvp_platform.device_cert_id IS '本平台作下级注册的设备证书ID（wvp_gb35114_cert.id）';
+COMMENT ON COLUMN wvp_platform.platform_cert_id IS '受信上级平台证书ID（wvp_gb35114_cert.id）';
 
 -- 国标平台下发的通道映射关系
 DECLARE
@@ -1137,3 +1147,130 @@ COMMENT ON COLUMN wvp_alarm.longitude IS '报警附带的经度';
 COMMENT ON COLUMN wvp_alarm.latitude IS '报警附带的纬度';
 COMMENT ON COLUMN wvp_alarm.alarm_type IS '报警类别';
 COMMENT ON COLUMN wvp_alarm.alarm_time IS '报警时间';
+
+-- GB35114 A 级国密证书管理表
+
+-- 根 CA 表
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM SYSOBJECTS WHERE NAME = 'WVP_GB35114_CA' AND TYPE$ = 'SCHOBJ';
+IF V_CNT > 0 THEN
+        EXECUTE IMMEDIATE 'DROP TABLE WVP_GB35114_CA';
+END IF;
+END;
+/
+CREATE TABLE wvp_gb35114_ca (
+                                id                  int identity(1,1) primary key,
+                                type                varchar(20) default 'LOCAL_CA',
+                                subject_cn          varchar(255),
+                                subject_dn          varchar(500),
+                                country             varchar(10),
+                                province            varchar(64),
+                                locality            varchar(64),
+                                organization        varchar(255),
+                                organizational_unit varchar(255),
+                                serial_number       varchar(100),
+                                cert_pem            clob,
+                                key_pem             clob,
+                                not_before          varchar(50),
+                                not_after           varchar(50),
+                                remark              varchar(500),
+                                create_time         varchar(50)
+);
+COMMENT ON COLUMN wvp_gb35114_ca.id IS '主键ID';
+COMMENT ON COLUMN wvp_gb35114_ca.type IS '类型：LOCAL_CA-本地CA(可签发，全局唯一) / TRUSTED_CA-受信任的CA(仅公钥，可重复导入)';
+COMMENT ON COLUMN wvp_gb35114_ca.subject_cn IS '主题 CN';
+COMMENT ON COLUMN wvp_gb35114_ca.subject_dn IS '完整主题DN（RFC2253）';
+COMMENT ON COLUMN wvp_gb35114_ca.country IS '国家 C';
+COMMENT ON COLUMN wvp_gb35114_ca.province IS '省份 ST';
+COMMENT ON COLUMN wvp_gb35114_ca.locality IS '城市 L';
+COMMENT ON COLUMN wvp_gb35114_ca.organization IS '组织 O';
+COMMENT ON COLUMN wvp_gb35114_ca.organizational_unit IS '组织单位 OU';
+COMMENT ON COLUMN wvp_gb35114_ca.serial_number IS '序列号';
+COMMENT ON COLUMN wvp_gb35114_ca.cert_pem IS '证书 PEM';
+COMMENT ON COLUMN wvp_gb35114_ca.key_pem IS '私钥 PEM（对称加密存储）';
+COMMENT ON COLUMN wvp_gb35114_ca.not_before IS '生效时间';
+COMMENT ON COLUMN wvp_gb35114_ca.not_after IS '失效时间';
+COMMENT ON COLUMN wvp_gb35114_ca.remark IS '备注';
+COMMENT ON COLUMN wvp_gb35114_ca.create_time IS '创建时间';
+
+-- 证书表
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM SYSOBJECTS WHERE NAME = 'WVP_GB35114_CERT' AND TYPE$ = 'SCHOBJ';
+IF V_CNT > 0 THEN
+        EXECUTE IMMEDIATE 'DROP TABLE WVP_GB35114_CERT';
+END IF;
+END;
+/
+CREATE TABLE wvp_gb35114_cert (
+                                  id                  int identity(1,1) primary key,
+                                  type                varchar(30) default 'ISSUED_DEVICE',
+                                  gb_id               varchar(50),
+                                  subject_cn          varchar(255),
+                                  subject_dn          varchar(500),
+                                  module_id           varchar(64),
+                                  country             varchar(10),
+                                  province            varchar(64),
+                                  locality            varchar(64),
+                                  organization        varchar(255),
+                                  organizational_unit varchar(255),
+                                  serial_number       varchar(100),
+                                  ca_id               int,
+                                  cert_pem            clob,
+                                  key_pem             clob,
+                                  csr_pem             clob,
+                                  not_before          varchar(50),
+                                  not_after           varchar(50),
+                                  validity_days       int,
+                                  key_usage           varchar(200),
+                                  revoked             bit default 0,
+                                  key_fingerprint     varchar(64),
+                                  remark              varchar(500),
+                                  create_time         varchar(50)
+);
+CREATE INDEX idx_gb35114_cert_type ON wvp_gb35114_cert (type, gb_id);
+CREATE INDEX idx_gb35114_cert_fingerprint ON wvp_gb35114_cert (type, key_fingerprint);
+COMMENT ON COLUMN wvp_gb35114_cert.id IS '主键ID';
+COMMENT ON COLUMN wvp_gb35114_cert.type IS '证书类型：SERVER_IDENTITY-服务端证书(本平台) / DEVICE_IDENTITY-客户端证书(本平台) / ISSUED_DEVICE-客户端证书(下级设备) / TRUSTED_PLATFORM-服务端证书(上级平台)';
+COMMENT ON COLUMN wvp_gb35114_cert.gb_id IS '关联国标 ID';
+COMMENT ON COLUMN wvp_gb35114_cert.subject_cn IS '主题 CN';
+COMMENT ON COLUMN wvp_gb35114_cert.subject_dn IS '完整主题DN（RFC2253）';
+COMMENT ON COLUMN wvp_gb35114_cert.module_id IS '密码模块 ID（附录B，22位十进制）；空表示无密码模块';
+COMMENT ON COLUMN wvp_gb35114_cert.country IS '国家 C';
+COMMENT ON COLUMN wvp_gb35114_cert.province IS '省份 ST';
+COMMENT ON COLUMN wvp_gb35114_cert.locality IS '城市 L';
+COMMENT ON COLUMN wvp_gb35114_cert.organization IS '组织 O';
+COMMENT ON COLUMN wvp_gb35114_cert.organizational_unit IS '组织单位 OU';
+COMMENT ON COLUMN wvp_gb35114_cert.serial_number IS '序列号';
+COMMENT ON COLUMN wvp_gb35114_cert.ca_id IS '签发 CA 的 ID，null 表示自签';
+COMMENT ON COLUMN wvp_gb35114_cert.cert_pem IS '证书 PEM';
+COMMENT ON COLUMN wvp_gb35114_cert.key_pem IS '私钥 PEM（对称加密存储）';
+COMMENT ON COLUMN wvp_gb35114_cert.csr_pem IS '待签发记录的CSR PEM（私钥与之同记录）';
+COMMENT ON COLUMN wvp_gb35114_cert.not_before IS '生效时间';
+COMMENT ON COLUMN wvp_gb35114_cert.not_after IS '失效时间';
+COMMENT ON COLUMN wvp_gb35114_cert.validity_days IS '签发时的有效期天数快照';
+COMMENT ON COLUMN wvp_gb35114_cert.key_usage IS '密钥用途扩展，如 digitalSignature、keyCertSign|cRLSign';
+COMMENT ON COLUMN wvp_gb35114_cert.revoked IS '是否已吊销';
+COMMENT ON COLUMN wvp_gb35114_cert.key_fingerprint IS '公钥指纹（SM3 十六进制）；相同表示同一个签名身份，证书可互换';
+COMMENT ON COLUMN wvp_gb35114_cert.remark IS '备注';
+COMMENT ON COLUMN wvp_gb35114_cert.create_time IS '创建时间';
+
+-- 旁路转推映射表
+DECLARE
+V_CNT INT;
+BEGIN
+SELECT COUNT(*) INTO V_CNT FROM SYSOBJECTS WHERE NAME = 'TDS_BYPASS' AND TYPE$ = 'SCHOBJ';
+IF V_CNT > 0 THEN
+        EXECUTE IMMEDIATE 'DROP TABLE TDS_BYPASS';
+END IF;
+END;
+/
+CREATE TABLE tds_bypass (
+                           dest_url varchar(255) primary key,
+                           src_url  varchar(255) not null
+);
+COMMENT ON COLUMN tds_bypass.dest_url IS '转码后地址';
+COMMENT ON COLUMN tds_bypass.src_url IS '转码前源地址';

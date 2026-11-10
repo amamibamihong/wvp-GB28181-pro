@@ -86,7 +86,7 @@ public class SpringDocConfig {
     @Bean
     public GroupedOpenApi publicApi5() {
         return GroupedOpenApi.builder()
-                .group("4. 服务管理")
+                .group("5. 服务管理")
                 .packagesToScan("com.genersoft.iot.vmp.server")
                 .build();
     }
@@ -94,15 +94,30 @@ public class SpringDocConfig {
     @Bean
     public GroupedOpenApi publicApi6() {
         return GroupedOpenApi.builder()
-                .group("5. 用户管理")
+                .group("6. 用户管理")
                 .packagesToScan("com.genersoft.iot.vmp.user")
+                .build();
+    }
+
+    /**
+     * GB35114 国密接口单独成组。
+     *
+     * <p>该模块的包 {@code com.genersoft.iot.vmp.gb35114} 不匹配「2. 国标28181」
+     * （那组只扫 {@code ...vmp.gb28181}），此前只散落在「1. 全部」里，
+     * 与 28181 的常规接口混在一起，找起来要翻很久。
+     */
+    @Bean
+    public GroupedOpenApi publicApiGm() {
+        return GroupedOpenApi.builder()
+                .group("7. GB35114 国密")
+                .packagesToScan("com.genersoft.iot.vmp.gb35114")
                 .build();
     }
 
     @Bean
     public GroupedOpenApi publicApi7() {
         return GroupedOpenApi.builder()
-                .group("6. 部标设备")
+                .group("8. 部标设备")
                 .packagesToScan("com.genersoft.iot.vmp.jt1078.controller")
                 .build();
     }
